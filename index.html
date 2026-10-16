@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Matrix Automation &amp; Control | Industrial Automation &amp; Aviation Fueling</title>
+    <meta
+      name="description"
+      content="Matrix Automation & Control — your trusted partner for industrial automation, instrumentation and aviation fueling solutions in Pakistan."
+    />
+    <meta name="theme-color" content="#dc2626" />
+
+    <link rel="icon" href="/favicon.ico" sizes="any" />
+    <link rel="icon" href="/favicon.png" type="image/png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+
+    <meta property="og:site_name" content="Matrix Automation & Control" />
+    <meta property="og:title" content="Matrix Automation & Control" />
+    <meta property="og:description" content="Industrial Automation, Instrumentation & Aviation Fueling Solutions" />
+    <meta property="og:type" content="website" />
+    <meta property="og:image" content="https://matrixpakistan.com/og-image.png" />
+    <meta name="twitter:card" content="summary_large_image" />
+
+    <!-- Every page loads its data (fetch, CORS) and images from Supabase: open both connections early. -->
+    <link rel="preconnect" href="%VITE_SUPABASE_URL%" crossorigin />
+    <link rel="preconnect" href="%VITE_SUPABASE_URL%" />
+
+    <!-- Self-hosted fonts (src/index.css). The main text font is needed for the first paint. -->
+    <link rel="preload" href="/src/assets/fonts/inter-latin.woff2" as="font" type="font/woff2" crossorigin />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

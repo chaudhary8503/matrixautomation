@@ -1,0 +1,91 @@
+# Build + prerender the site, then (only when enabled) upload dist/ to cPanel over FTPS.
+#
+# Repository Settings → Secrets and variables → Actions:
+#   Variables: VITE_SUPABASE_URL, VITE_SUPABASE_PUBLISHABLE_KEY, DEPLOY_ENABLED ("true" to deploy),
+#              FTP_SERVER_DIR (optional, default "./" — the FTP account's folder for public_html)
+#   Secrets:   FTP_SERVER, FTP_USERNAME, FTP_PASSWORD
+#
+# Until DEPLOY_ENABLED is "true", every run only builds and checks — nothing touches the server.
+
+name: Build & deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    # 21:00 UTC = 02:00 Pakistan time. Fresh snapshots + sitemap for products added during the day.
+    - cron: "0 21 * * *"
+
+# Never run two deploys at once; a newer run waits for the current one to finish.
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL }}
+      VITE_SUPABASE_PUBLISHABLE_KEY: ${{ vars.VITE_SUPABASE_PUBLISHABLE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Check repository variables
+        run: |
+          if [ -z "$VITE_SUPABASE_URL" ] || [ -z "$VITE_SUPABASE_PUBLISHABLE_KEY" ]; then
+            echo "::error::Set VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY under Settings → Secrets and variables → Actions → Variables."
+            exit 1
+          fi
+
+      - run: npm ci
+
+      - run: npm run build
+
+      - name: Install Chromium for prerendering
+        run: npx playwright install --with-deps chromium
+
+      - name: Prerender pages + sitemap
+        run: npm run prerender
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          include-hidden-files: true # .htaccess
+          retention-days: 7
+          if-no-files-found: error
+
+  deploy:
+    needs: build
+    # Off until the owner switches it on (Variables → DEPLOY_ENABLED = true). Only from main.
+    if: vars.DEPLOY_ENABLED == 'true' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Upload to cPanel (FTPS)
+        uses: SamKirkland/FTP-Deploy-Action@v4.3.5
+        with:
+          server: ${{ secrets.FTP_SERVER }}
+          username: ${{ secrets.FTP_USERNAME }}
+          password: ${{ secrets.FTP_PASSWORD }}
+          protocol: ftps
+          local-dir: ./dist/
+          server-dir: ${{ vars.FTP_SERVER_DIR || './' }}
+          # Never "dangerous-clean-slate". The action records what it uploaded in
+          # .ftp-deploy-sync-state.json and only ever deletes files from that list, so cgi-bin,
+          # .well-known, mail folders and other server files are left alone.

@@ -1,0 +1,35 @@
+# Supabase pauses free projects after 7 days without activity. One tiny read every 3 days keeps
+# the project awake — and if it ever is paused, this run fails, so you get GitHub's failure email.
+
+name: Supabase keep-alive
+
+on:
+  schedule:
+    - cron: "0 6 */3 * *"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Read one row from Supabase
+        env:
+          SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL }}
+          SUPABASE_KEY: ${{ vars.VITE_SUPABASE_PUBLISHABLE_KEY }}
+        run: |
+          if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_KEY" ]; then
+            echo "::error::Repository variables VITE_SUPABASE_URL / VITE_SUPABASE_PUBLISHABLE_KEY are not set."
+            exit 1
+          fi
+          status=$(curl -sS -o response.json -w '%{http_code}' --max-time 30 \
+            -H "apikey: $SUPABASE_KEY" \
+            "${SUPABASE_URL%/}/rest/v1/brands?select=id&limit=1")
+          echo "HTTP $status"
+          if [ "$status" != "200" ]; then
+            cat response.json || true
+            echo "::error::Supabase answered HTTP $status — the project may be paused. Restore it in the Supabase dashboard."
+            exit 1
+          fi
