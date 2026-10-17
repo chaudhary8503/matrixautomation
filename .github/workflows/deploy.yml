@@ -57,6 +57,11 @@ jobs:
       - name: Prerender pages + sitemap
         run: npm run prerender
 
+      # Clicks through the built site in a browser, served exactly like cPanel serves it (snapshots,
+      # 200.html, 404 for missing files). Any crash or white screen fails here → nothing is deployed.
+      - name: Smoke test (real browser, desktop + mobile)
+        run: npm run smoke
+
       - uses: actions/upload-artifact@v4
         with:
           name: dist

@@ -32,7 +32,8 @@ if it detects a secret key.
 | `npm run typecheck`  | TypeScript check only                                                |
 | `npm run build`      | Type check + production build into `dist/`                           |
 | `npm run prerender`  | After `build`: HTML snapshot of every public page + `sitemap.xml`    |
-| `npm run build:full` | `build` + `prerender` — exactly what the deploy workflow runs        |
+| `npm run smoke`      | After `prerender`: clicks through the built site in a real browser   |
+| `npm run build:full` | `build` + `prerender` + `smoke`, exactly what the deploy workflow runs |
 | `npm run preview`    | Serve the built `dist/` locally (SPA mode, ignores the snapshots)    |
 
 `npm run prerender` needs Chromium once per machine: `npx playwright install chromium`.
@@ -100,6 +101,32 @@ So an admin edit shows up on the next page load, with no rebuild needed. A produ
 the last build has no snapshot yet, so Apache serves `200.html` and the app loads it live. It gets
 its own snapshot and sitemap entry in the next nightly build.
 
+## Smoke test
+
+`npm run smoke` (`scripts/smoke.mjs`) serves `dist/` exactly the way `public/.htaccess` serves it on
+cPanel: snapshot pages, the `200.html` fallback, and a 404 for missing `/assets/` files. It then
+uses headless Chromium on desktop and mobile to:
+
+- load every page directly, then click through the header nav, product and brand cards, a category
+  filter, the mobile menu and header search, and Back/Forward,
+- do all of that both with snapshots and without them (like a brand-new product),
+- check the 404 page and the admin sign-in page, and that public pages never download admin code,
+- simulate a code file deleted by a newer deploy: the page must show a message, not a white screen.
+
+Any JavaScript error, failed request or blank page fails the run, so the deploy job never starts.
+Many problems happen only on the live site, because there the app starts from a snapshot. `npm run
+dev` and `npm run preview` don't do that, so run `npm run build:full` before pushing changes to
+the app's startup, routing or animations.
+
+## Error handling
+
+- `src/components/layout/ErrorBoundary.tsx`: if a page crashes, it shows a message with a reload
+  button. The header and footer keep working, and navigating away clears the error. A second,
+  outer boundary covers everything else, so the app never ends up on a white screen.
+- After a deploy, old code files are removed from the server. A visitor whose tab was already open
+  gets one automatic reload to pick up the new version, at most once every 30 s, so it can never
+  loop. Missing `/assets/` files return a real 404 (`.htaccess`).
+
 ## Performance notes
 
 - Pages are prefetched: hovering, focusing or touching a link downloads that page's code and data,
@@ -126,7 +153,8 @@ otherwise `200.html`. It also removes trailing slashes (301) and turns `Director
 (so new products get snapshots and sitemap entries), and on demand (Actions → Build & deploy →
 Run workflow). Two runs never overlap.
 
-- **build** job: `npm ci` → `npm run build` → install Chromium → `npm run prerender` → uploads
+- **build** job: `npm ci` → `npm run build` → install Chromium → `npm run prerender` →
+  `npm run smoke` → uploads
   `dist/` as an artifact (you can download it from the run page).
 - **deploy** job: runs **only if the variable `DEPLOY_ENABLED` is `true`**. It uploads `dist/` over
   FTPS with [FTP-Deploy-Action](https://github.com/SamKirkland/FTP-Deploy-Action). Only changed

@@ -1,11 +1,13 @@
 import { Suspense } from "react";
-import { Outlet } from "react-router";
+import { Outlet, useLocation } from "react-router";
 import { SiteHeader } from "./SiteHeader";
 import { SiteFooter } from "./SiteFooter";
 import { WhatsAppButton } from "./WhatsAppButton";
 import { PageFallback } from "./PageFallback";
+import { ErrorBoundary } from "./ErrorBoundary";
 
 export function PublicLayout() {
+  const { pathname } = useLocation();
   return (
     <div className="flex min-h-screen flex-col">
       <a
@@ -16,10 +18,13 @@ export function PublicLayout() {
       </a>
       <SiteHeader />
       <main id="main" className="flex-1 pt-16 lg:pt-20">
-        {/* Inside the layout: while a page's code loads, header and footer stay on screen. */}
-        <Suspense fallback={<PageFallback />}>
-          <Outlet />
-        </Suspense>
+        {/* Inside the layout: while a page's code loads — or if a page crashes — header and footer
+            stay on screen. The boundary resets on navigation. */}
+        <ErrorBoundary resetKey={pathname}>
+          <Suspense fallback={<PageFallback />}>
+            <Outlet />
+          </Suspense>
+        </ErrorBoundary>
       </main>
       <SiteFooter />
       <WhatsAppButton />

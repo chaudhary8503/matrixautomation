@@ -7,9 +7,10 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "prerender": "node scripts/prerender.mjs",
-    "build:full": "npm run build && npm run prerender",
+    "build:full": "npm run build && npm run prerender && npm run smoke",
     "preview": "vite preview",
-    "typecheck": "tsc -b"
+    "typecheck": "tsc -b",
+    "smoke": "node scripts/smoke.mjs"
   },
   "dependencies": {
     "@radix-ui/react-alert-dialog": "^1.2.1",

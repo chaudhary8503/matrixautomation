@@ -44,6 +44,11 @@ DirectorySlash Off
   RewriteCond %{REQUEST_FILENAME} -f
   RewriteRule ^ - [L]
 
+  # 3b. A missing code/style file is a real 404 — never the app shell. (After a deploy, old hashed
+  #     files are gone: an HTML page served as JavaScript would crash the page, and could even be
+  #     cached for a year under the /assets/ rule below. A clean 404 lets the app reload itself.)
+  RewriteRule ^assets/ - [R=404,L]
+
   # 4. Home page snapshot.
   RewriteRule ^$ /index.html [L]
 
