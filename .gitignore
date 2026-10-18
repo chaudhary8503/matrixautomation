@@ -20,3 +20,5 @@ dist
 # Supabase CLI local files
 supabase/.temp/
 supabase/.branches/
+
+imports/

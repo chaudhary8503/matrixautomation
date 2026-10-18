@@ -8,6 +8,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { FilterChips, type Chip } from "@/components/site/FilterChips";
 import { ProductGrid } from "@/components/site/ProductGrid";
 import { ErrorState } from "@/components/site/ErrorState";
+import { LogoImage } from "@/components/site/LogoTile";
 import NotFound from "./NotFound";
 
 export default function BrandDetail() {
@@ -91,9 +92,9 @@ export default function BrandDetail() {
                 animate={{ opacity: 1, scale: 1 }}
                 transition={{ delay: 0.2 }}
                 // Fixed size (the widest a logo could be), so the title beside it never jumps when the logo loads.
-                className="flex h-16 w-[11.5rem] max-w-full shrink-0 items-center justify-center rounded-lg border border-border bg-white px-3"
+                className="relative h-16 w-[11.5rem] max-w-full shrink-0 rounded-lg border border-border bg-white"
               >
-                <img src={b.logo_url} alt={`${name} logo`} decoding="async" className="h-12 w-auto max-w-full object-contain" />
+                <LogoImage src={b.logo_url} alt={`${name} logo`} eager className="inset-x-3 inset-y-2" />
               </m.div>
             )}
             <div className="min-w-0">

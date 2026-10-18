@@ -39,6 +39,7 @@ const PUBLIC_QUERY_KEYS = new Set([
   "category_documents",
   "product",
   "industries",
+  "logo_box",
 ]);
 
 const started = Date.now();
@@ -175,6 +176,9 @@ async function waitUntilSettled(page) {
   );
 }
 
+/** Logo measurements collected from every page: logo URL → box (written to dist/logo-boxes.json). */
+const logoBoxes = new Map();
+
 async function snapshot(context, origin, route) {
   const page = await context.newPage();
   const problems = [];
@@ -219,6 +223,16 @@ async function snapshot(context, origin, route) {
     }
     await page.waitForTimeout(300);
 
+    // Every logo must be measured (src/lib/logo-trim.ts) before the snapshot, or it would be
+    // frozen invisible. Lazy logos have loaded by now, because the page was scrolled to the end.
+    const logosDone = await page
+      .waitForFunction(() => !document.querySelector("[data-logo-pending]"), null, { timeout: 15_000 })
+      .then(() => true, () => false);
+    if (!logosDone) {
+      const left = await page.$$eval("[data-logo-pending]", (els) => els.map((e) => e.getAttribute("src")));
+      fail(`${route}: ${left.length} logo(s) never finished loading/measuring, e.g. ${left[0]}`);
+    }
+
     if (problems.length) fail(problems.join("\n  "));
 
     const result = await page.evaluate(
@@ -236,6 +250,8 @@ async function snapshot(context, origin, route) {
         // Transient bits that must not be frozen into the snapshot.
         document.querySelectorAll("[data-sonner-toast]").forEach((el) => el.remove());
         document.querySelectorAll('a[aria-label="Chat with us on WhatsApp"]').forEach((el) => el.removeAttribute("style"));
+        // Logos were loaded in CORS mode only so they could be measured here; visitors load them normally.
+        document.querySelectorAll("img[data-logo]").forEach((el) => el.removeAttribute("crossorigin"));
         // Vite's preload helper writes absolute URLs (http://127.0.0.1:port/assets/…) — make them root-relative.
         for (const el of document.querySelectorAll("[href], [src]")) {
           for (const attr of ["href", "src"]) {
@@ -250,6 +266,7 @@ async function snapshot(context, origin, route) {
         // browser's first render matches the snapshot. The app marks it stale and refetches at once.
         const state = window.__RQ_DEHYDRATE__?.() ?? { mutations: [], queries: [] };
         report.queryKeys = state.queries.map((q) => q.queryKey);
+        report.logoBoxes = state.queries.filter((q) => q.queryKey[0] === "logo_box").map((q) => [q.queryKey[1], q.state.data]);
         report.dropped = [];
         state.queries = state.queries.filter((q) => {
           // A very large query (e.g. thousands of products) isn't worth inlining into every page.
@@ -287,6 +304,7 @@ async function snapshot(context, origin, route) {
     const out = route === "/" ? path.join(DIST, "index.html") : path.join(DIST, ...route.split("/").filter(Boolean), "index.html");
     await mkdir(path.dirname(out), { recursive: true });
     await writeFile(out, result.html);
+    for (const [src, box] of result.logoBoxes) logoBoxes.set(src, box);
   } finally {
     await page.close();
   }
@@ -352,11 +370,13 @@ async function main() {
     server.close();
   }
 
-  // 5. Sitemap.
+  // 5. Sitemap, and the logo measurements for the whole site (src/lib/logo-trim.ts).
   await writeFile(path.join(DIST, "sitemap.xml"), sitemap(entries));
+  const boxes = Object.fromEntries([...logoBoxes].sort(([a], [b]) => a.localeCompare(b)));
+  await writeFile(path.join(DIST, "logo-boxes.json"), JSON.stringify(boxes));
 
   // 6. Summary.
-  log(`done: ${done} pages + sitemap.xml (${entries.length} URLs) in ${((Date.now() - started) / 1000).toFixed(1)}s`);
+  log(`done: ${done} pages + sitemap.xml (${entries.length} URLs) + ${logoBoxes.size} logo measurements in ${((Date.now() - started) / 1000).toFixed(1)}s`);
 }
 
 main().catch((err) => {

@@ -1,7 +1,22 @@
 import { Link } from "react-router";
 import { m } from "framer-motion";
-import { ArrowRight, Award, CircleCheckBig, Eye, Globe, Headphones, Shield, Target, Users } from "lucide-react";
+import {
+  ArrowRight,
+  Award,
+  ChevronRight,
+  CircleCheckBig,
+  Eye,
+  Globe,
+  Headphones,
+  Package,
+  Shield,
+  Target,
+  Truck,
+  Users,
+  Wrench,
+} from "lucide-react";
 import { useSeo } from "@/hooks/use-seo";
+import { SectionHeading } from "@/components/site/SectionHeading";
 import { fadeUp, stagger } from "@/components/site/motion";
 
 const HIGHLIGHTS = ["Authorized Distributor", "Technical Expertise", "Fast Delivery", "After-Sales Support"];
@@ -29,6 +44,13 @@ const VALUES = [
     title: "Our Team",
     desc: "A team of dedicated engineers with deep field experience across oil & gas, textile, pharma and power.",
   },
+];
+
+const STEPS = [
+  { icon: Wrench, title: "Identify Your Need", desc: "Tell us about your industrial automation requirements and challenges." },
+  { icon: Package, title: "Product Selection", desc: "Our experts recommend the best products from our extensive catalog." },
+  { icon: Truck, title: "Fast Delivery", desc: "We ensure timely delivery with proper packaging and documentation." },
+  { icon: Headphones, title: "Ongoing Support", desc: "Post-sale technical support and assistance whenever you need." },
 ];
 
 export default function WhoWeAre() {
@@ -101,6 +123,45 @@ export default function WhoWeAre() {
             </m.div>
           ))}
         </m.div>
+
+        {/* How we work */}
+        <div className="mt-16 sm:mt-20">
+          <SectionHeading
+            eyebrow="Our Process"
+            title="How We"
+            highlight="Work"
+            align="left"
+            description="From requirement to delivery — a seamless experience designed for engineers."
+          />
+          <m.div
+            variants={stagger(0.12)}
+            initial="hidden"
+            whileInView="visible"
+            viewport={{ once: true }}
+            className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-4"
+          >
+            {STEPS.map((step, i) => (
+              <m.div key={step.title} variants={fadeUp} className="group relative">
+                <div className="glass-panel-hover h-full p-8 text-center">
+                  <m.div
+                    whileHover={{ rotate: 5, scale: 1.05 }}
+                    className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl border border-primary/20 bg-primary/10 transition-all duration-500 group-hover:border-primary group-hover:bg-primary"
+                  >
+                    <step.icon className="h-7 w-7 text-primary transition-colors duration-500 group-hover:text-primary-foreground" />
+                  </m.div>
+                  <span className="mb-2 block font-mono text-xs text-primary/60">Step {i + 1}</span>
+                  <h3 className="mb-2 text-base font-bold text-foreground">{step.title}</h3>
+                  <p className="text-xs leading-relaxed text-muted-foreground">{step.desc}</p>
+                </div>
+                {i < STEPS.length - 1 && (
+                  <div className="absolute -right-3 top-1/2 z-10 hidden -translate-y-1/2 lg:flex">
+                    <ChevronRight className="h-5 w-5 text-primary/30" />
+                  </div>
+                )}
+              </m.div>
+            ))}
+          </m.div>
+        </div>
 
         <div className="mt-12 text-center">
           <Link to="/contact" className="glow-button inline-flex items-center gap-2 rounded-lg px-6 py-3.5 text-sm font-semibold sm:px-8">

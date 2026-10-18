@@ -25,6 +25,7 @@ const SNAPSHOT_KEYS = new Set([
   "category_documents",
   "product",
   "industries",
+  "logo_box", // where the logo sits inside each logo file (src/lib/logo-trim.ts)
 ]);
 
 const isSnapshotKey = (key: readonly unknown[] | undefined) => typeof key?.[0] === "string" && SNAPSHOT_KEYS.has(key[0]);

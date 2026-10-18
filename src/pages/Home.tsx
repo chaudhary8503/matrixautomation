@@ -1,23 +1,7 @@
 import { useMemo } from "react";
 import { Link } from "react-router";
 import { m } from "framer-motion";
-import {
-  ArrowRight,
-  ChevronRight,
-  Clock,
-  Cpu,
-  Gauge,
-  Headphones,
-  Layers,
-  Package,
-  Send,
-  Settings,
-  TrendingUp,
-  Truck,
-  Users,
-  Wrench,
-  Zap,
-} from "lucide-react";
+import { ArrowRight, Clock, Layers, Package, Send, TrendingUp, Users } from "lucide-react";
 import { useBrands, useCatalog, useCategories, useIndustries, useSiteSettings, type Settings as SiteInfo } from "@/lib/queries";
 import { industryIcon } from "@/lib/icons";
 import { SITE_URL, useSeo, type JsonLd } from "@/hooks/use-seo";
@@ -26,24 +10,10 @@ import { LogoTile } from "@/components/site/LogoTile";
 import { AnimatedCounter } from "@/components/site/AnimatedCounter";
 import { fadeUp, stagger } from "@/components/site/motion";
 
-const FLOATING = [
-  { Icon: Cpu, delay: 0, x: "10%", y: "20%" },
-  { Icon: Gauge, delay: 0.5, x: "85%", y: "30%" },
-  { Icon: Settings, delay: 1, x: "75%", y: "70%" },
-  { Icon: Zap, delay: 1.5, x: "15%", y: "75%" },
-];
-
 /** 2 / 3 / 5 per row, centred when a row is not full. */
 const TILE = "w-[calc(50%-0.5rem)] sm:w-[calc(33.333%-0.67rem)] lg:w-[calc(20%-0.8rem)]";
 
 const STAT_ICONS = [Package, TrendingUp, Users, Clock];
-
-const STEPS = [
-  { icon: Wrench, title: "Identify Your Need", desc: "Tell us about your industrial automation requirements and challenges." },
-  { icon: Package, title: "Product Selection", desc: "Our experts recommend the best products from our extensive catalog." },
-  { icon: Truck, title: "Fast Delivery", desc: "We ensure timely delivery with proper packaging and documentation." },
-  { icon: Headphones, title: "Ongoing Support", desc: "Post-sale technical support and assistance whenever you need." },
-];
 
 /** schema.org LocalBusiness for the home page, built from Admin → Settings. */
 function organizationLd(s: SiteInfo): JsonLd {
@@ -93,36 +63,24 @@ function Hero() {
         <picture>
           <source
             type="image/webp"
-            srcSet="/images/hero-768.webp 768w, /images/hero-1280.webp 1280w, /images/hero-1920.webp 1920w"
+            srcSet="/images/hero-v2-768.webp 768w, /images/hero-v2-1280.webp 1280w, /images/hero-v2-1920.webp 1920w"
             sizes="100vw"
           />
           <img
-            src="/images/hero-1920.jpg"
+            src="/images/hero-v2-1920.jpg"
             alt="Industrial automation equipment"
             width={1920}
-            height={688}
+            height={700}
             fetchPriority="high"
             className="h-full w-full object-cover object-center"
           />
         </picture>
-        <div className="absolute inset-0 z-10 bg-black/65" />
-        <div className="absolute inset-0 z-20 bg-gradient-to-r from-black/95 via-black/70 to-black/30" />
-        <div className="absolute inset-0 z-20 bg-gradient-to-t from-black/80 via-black/20 to-black/40" />
+        {/* The image is already dark (graphite backdrop), so only light layers. Phones/tablets: the
+            text covers the full width, so an even veil. Desktop: the text is on the left, so a
+            gradient behind it that fades out before the instruments. Plus a soft fade at the bottom. */}
+        <div className="absolute inset-0 z-10 bg-black/60 lg:bg-transparent lg:bg-gradient-to-r lg:from-black/85 lg:from-10% lg:via-black/55 lg:via-45% lg:to-transparent lg:to-80%" />
+        <div className="absolute inset-x-0 bottom-0 z-10 h-1/3 bg-gradient-to-t from-black/60 to-transparent" />
       </div>
-
-      {FLOATING.map(({ Icon, delay, x, y }, i) => (
-        <m.div
-          key={i}
-          aria-hidden
-          className="absolute z-20 hidden h-12 w-12 items-center justify-center rounded-xl border border-primary/20 bg-primary/10 lg:flex"
-          style={{ left: x, top: y }}
-          initial={{ opacity: 0, scale: 0 }}
-          animate={{ opacity: 0.6, scale: 1 }}
-          transition={{ delay: delay + 0.8, duration: 0.6 }}
-        >
-          <Icon className="h-6 w-6 text-primary" />
-        </m.div>
-      ))}
 
       <div className="container relative z-30 px-4">
         <div className="max-w-3xl p-2 sm:p-6 lg:p-10">
@@ -251,48 +209,6 @@ export default function Home() {
           </div>
         </section>
       )}
-
-      {/* How we work */}
-      <section className="py-20">
-        <div className="container px-4">
-          <SectionHeading
-            eyebrow="Our Process"
-            title="How We"
-            highlight="Work"
-            description="From requirement to delivery — a seamless experience designed for engineers."
-            className="mb-14"
-          />
-          <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-4">
-            {STEPS.map((step, i) => (
-              <m.div
-                key={step.title}
-                initial={{ opacity: 0, y: 30 }}
-                whileInView={{ opacity: 1, y: 0 }}
-                viewport={{ once: true }}
-                transition={{ delay: i * 0.12, duration: 0.5 }}
-                className="group relative"
-              >
-                <div className="glass-panel-hover h-full p-8 text-center">
-                  <m.div
-                    whileHover={{ rotate: 5, scale: 1.05 }}
-                    className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl border border-primary/20 bg-primary/10 transition-all duration-500 group-hover:border-primary group-hover:bg-primary"
-                  >
-                    <step.icon className="h-7 w-7 text-primary transition-colors duration-500 group-hover:text-primary-foreground" />
-                  </m.div>
-                  <span className="mb-2 block font-mono text-xs text-primary/60">Step {i + 1}</span>
-                  <h3 className="mb-2 text-base font-bold text-foreground">{step.title}</h3>
-                  <p className="text-xs leading-relaxed text-muted-foreground">{step.desc}</p>
-                </div>
-                {i < STEPS.length - 1 && (
-                  <div className="absolute -right-3 top-1/2 z-10 hidden -translate-y-1/2 lg:flex">
-                    <ChevronRight className="h-5 w-5 text-primary/30" />
-                  </div>
-                )}
-              </m.div>
-            ))}
-          </div>
-        </div>
-      </section>
 
       {/* Brands */}
       {shownBrands.length > 0 && (
