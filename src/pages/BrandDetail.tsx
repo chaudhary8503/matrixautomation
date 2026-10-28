@@ -1,31 +1,77 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { Link, useParams, useSearchParams } from "react-router";
 import { m } from "framer-motion";
 import { ArrowLeft, Send } from "lucide-react";
-import { useBrand, useBrandCategories, useBrandProducts } from "@/lib/queries";
+import { PAGE_SIZE, useBrand, useBrandCategories, useCategories, useProductPage } from "@/lib/queries";
+import { buildCategoryTree, categoryFilter, flattenTree } from "@/lib/category-tree";
 import { breadcrumbs, useSeo } from "@/hooks/use-seo";
+import { cn } from "@/lib/utils";
 import { Skeleton } from "@/components/ui/skeleton";
-import { FilterChips, type Chip } from "@/components/site/FilterChips";
+import { CategorySidebar } from "@/components/site/CategorySidebar";
+import { Pagination, useScrollOnPageChange } from "@/components/site/Pagination";
 import { ProductGrid } from "@/components/site/ProductGrid";
 import { ErrorState } from "@/components/site/ErrorState";
 import { LogoImage } from "@/components/site/LogoTile";
 import NotFound from "./NotFound";
 
+/** /brands/<brand>?cat=…&page=… */
+function brandHref(brandSlug: string, cat: string, page = 1) {
+  const p = new URLSearchParams();
+  if (cat) p.set("cat", cat);
+  if (page > 1) p.set("page", String(page));
+  const s = p.toString();
+  return `/brands/${brandSlug}${s ? `?${s}` : ""}`;
+}
+
 export default function BrandDetail() {
   const { slug } = useParams();
   const [params, setParams] = useSearchParams();
   const cat = params.get("cat") ?? "";
+  const page = Math.max(1, Number.parseInt(params.get("page") ?? "1", 10) || 1);
 
   const brand = useBrand(slug);
-  const categories = useBrandCategories(brand.data?.id);
-  const products = useBrandProducts(brand.data?.id);
+  const brandCategories = useBrandCategories(brand.data?.id);
+  const categories = useCategories();
+  const filter = categoryFilter(categories.data, cat);
 
-  const selectedCat = categories.data?.find((c) => c.category_slug === cat);
+  // Sidebar: only the categories this brand has products in (and their parents), with counts.
+  const tree = useMemo(() => {
+    if (!categories.data || !brandCategories.data) return [];
+    const counts = new Map(brandCategories.data.map((c) => [c.category_id, c.product_count]));
+    return buildCategoryTree(categories.data, counts, { keepSlug: cat });
+  }, [categories.data, brandCategories.data, cat]);
+  const allCount = brandCategories.data?.reduce((n, c) => n + c.product_count, 0);
+  const showSidebar = flattenTree(tree).length > 1;
+
+  const products = useProductPage(
+    { brandId: brand.data?.id, categoryIds: filter?.ids, page },
+    !!brand.data && (!cat || !!categories.data),
+  );
+  const total = products.data?.total ?? 0;
+  const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
+
+  // An old link past the last page: go to the last page instead.
+  useEffect(() => {
+    if (products.data && !products.isPlaceholderData && page > pageCount) {
+      setParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          if (pageCount > 1) next.set("page", String(pageCount));
+          else next.delete("page");
+          return next;
+        },
+        { replace: true },
+      );
+    }
+  }, [products.data, products.isPlaceholderData, page, pageCount, setParams]);
+
+  const resultsRef = useRef<HTMLDivElement>(null);
+  useScrollOnPageChange(resultsRef, page);
   // While loading (or when not found — NotFound sets its own tags) leave the head alone.
   useSeo(
     brand.data
       ? {
-          title: selectedCat ? `${brand.data.name} ${selectedCat.category_name}` : `${brand.data.name} Products`,
+          title: `${filter ? `${brand.data.name} ${filter.label}` : `${brand.data.name} Products`}${page > 1 ? ` — Page ${page}` : ""}`,
           description:
             brand.data.description ??
             `All ${brand.data.name} products available from Matrix Automation & Control in Pakistan.`,
@@ -39,23 +85,6 @@ export default function BrandDetail() {
         }
       : null,
   );
-
-  const chips: Chip[] = useMemo(() => {
-    const list = categories.data ?? [];
-    const total = list.reduce((n, c) => n + c.product_count, 0);
-    return [
-      { value: "", label: "All", count: total },
-      ...list.map((c) => ({ value: c.category_slug, label: c.category_name, count: c.product_count })),
-    ];
-  }, [categories.data]);
-
-  const visible = useMemo(
-    () => (products.data ?? []).filter((p) => !cat || p.category?.slug === cat),
-    [products.data, cat],
-  );
-
-  const setCat = (value: string) =>
-    setParams(value ? { cat: value } : {}, { preventScrollReset: true });
 
   if (brand.isError)
     return (
@@ -113,31 +142,63 @@ export default function BrandDetail() {
           </div>
         )}
 
-        {chips.length > 2 && (
-          <m.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.1 }} className="mb-8">
-            <FilterChips label={`Filter ${name} products by category`} chips={chips} value={cat} onChange={setCat} />
-          </m.div>
-        )}
+        {/* Sidebar only when there is something to choose between (more than one category). */}
+        <div className={cn(showSidebar && "lg:grid lg:grid-cols-[16rem_minmax(0,1fr)] lg:items-start lg:gap-8")}>
+          {showSidebar && (
+            <CategorySidebar
+              label={`${name} product categories`}
+              tree={tree}
+              selected={cat}
+              hrefFor={(c) => brandHref(b?.slug ?? slug ?? "", c)}
+              allLabel={`All ${name} products`}
+              allCount={allCount}
+              className="mb-6 lg:mb-0"
+            />
+          )}
 
-        {products.isError ? (
-          <ErrorState message="We couldn't load the products." onRetry={() => void products.refetch()} />
-        ) : (
-          <ProductGrid
-            products={visible}
-            loading={brand.isPending || products.isPending}
-            showBrand={false}
-            empty={
-              <div className="space-y-4">
-                <p>
-                  {cat ? "No products in this category yet." : `No ${name} products are listed online yet.`}
-                </p>
-                <Link to="/contact" className="glow-button inline-flex items-center gap-2 rounded-lg px-5 py-2.5 text-sm">
-                  <Send className="h-4 w-4" /> Ask us about {name}
-                </Link>
+          <div ref={resultsRef} className="min-w-0 scroll-mt-28">
+            {products.data && total > PAGE_SIZE && (
+              <p className="mb-4 text-xs text-muted-foreground" aria-live="polite">
+                Showing {((page - 1) * PAGE_SIZE + 1).toLocaleString()}–{Math.min(page * PAGE_SIZE, total).toLocaleString()} of{" "}
+                {total.toLocaleString()} products
+                {filter && (
+                  <>
+                    {" "}
+                    in <span className="font-medium text-foreground">{filter.label}</span>
+                  </>
+                )}
+              </p>
+            )}
+            {products.isError ? (
+              <ErrorState message="We couldn't load the products." onRetry={() => void products.refetch()} />
+            ) : (
+              <div
+                aria-busy={products.isPlaceholderData || undefined}
+                className={cn("transition-opacity", products.isPlaceholderData && "opacity-60")}
+              >
+                <ProductGrid
+                  products={products.data?.items ?? []}
+                  loading={brand.isPending || products.isPending}
+                  showBrand={false}
+                  empty={
+                    <div className="space-y-4">
+                      <p>{cat ? "No products in this category yet." : `No ${name} products are listed online yet.`}</p>
+                      <Link to="/contact" className="glow-button inline-flex items-center gap-2 rounded-lg px-5 py-2.5 text-sm">
+                        <Send className="h-4 w-4" /> Ask us about {name}
+                      </Link>
+                    </div>
+                  }
+                />
+                <Pagination
+                  page={page}
+                  pageCount={pageCount}
+                  hrefFor={(n) => brandHref(b?.slug ?? slug ?? "", cat, n)}
+                  className="mt-10"
+                />
               </div>
-            }
-          />
-        )}
+            )}
+          </div>
+        </div>
       </div>
     </section>
   );

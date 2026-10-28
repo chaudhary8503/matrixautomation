@@ -29,7 +29,10 @@ export function ProductCard({ product, showBrand = true }: { product: ProductCar
           )}
           {blurb && <p className="mb-4 line-clamp-3 flex-1 text-xs text-muted-foreground">{blurb}</p>}
           <div className="mt-auto flex items-center justify-between gap-2">
-            <span className="truncate font-mono text-[10px] text-muted-foreground">{product.category?.name}</span>
+            <span className="truncate font-mono text-[10px] text-muted-foreground">
+              {product.category?.parent_name ? `${product.category.parent_name} · ` : ""}
+              {product.category?.name}
+            </span>
             <ArrowRight className="h-4 w-4 shrink-0 text-muted-foreground transition-all group-hover:translate-x-1 group-hover:text-primary" />
           </div>
         </div>

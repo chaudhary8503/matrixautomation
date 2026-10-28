@@ -1,7 +1,7 @@
 import { useMemo, useState, type FormEvent } from "react";
 import { Link } from "react-router";
 import { useQuery } from "@tanstack/react-query";
-import { FileText, FolderTree, Loader2, Paperclip, Pencil, Plus } from "lucide-react";
+import { CornerDownRight, FileText, FolderTree, Loader2, Paperclip, Pencil, Plus } from "lucide-react";
 import { toast } from "sonner";
 import { supabase } from "@/lib/supabase";
 import type { Category, CategoryDocument } from "@/types/database";
@@ -23,18 +23,36 @@ import { OrderButtons, move } from "../components/OrderButtons";
 import { SLUG_RE, slugify } from "../slug";
 import { listDocuments, removeStoredFiles } from "../storage";
 import { friendlyError } from "../errors";
+import { cn } from "@/lib/utils";
 
 export const DOC_TYPES = ["Manual", "Data Sheet", "Approval / Certification", "Application Note", "Brochure", "Other"] as const;
 
 type CategoryWithDocs = Category & { documents: CategoryDocument[] };
 
-function CategoryDialog({ category, onClose, sortOrder }: { category: Category | null; onClose: () => void; sortOrder: number }) {
+function CategoryDialog({
+  category,
+  categories,
+  onClose,
+  sortOrder,
+}: {
+  category: Category | null;
+  categories: Category[];
+  onClose: () => void;
+  sortOrder: number;
+}) {
   const refresh = useRefreshAll();
   const [name, setName] = useState(category?.name ?? "");
   const [slug, setSlug] = useState(category?.slug ?? "");
   const [slugTouched, setSlugTouched] = useState(!!category);
   const [image, setImage] = useState<string | null>(category?.image_url ?? null);
   const [description, setDescription] = useState(category?.description ?? "");
+  const [parentId, setParentId] = useState(category?.parent_id ?? "");
+  // Only top-level categories can be parents (one level deep), and a category that already has
+  // subcategories stays top-level itself.
+  const hasChildren = !!category && categories.some((c) => c.parent_id === category.id);
+  const parentChoices = categories
+    .filter((c) => !c.parent_id && c.id !== category?.id)
+    .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -44,7 +62,7 @@ function CategoryDialog({ category, onClose, sortOrder }: { category: Category |
     if (!name.trim()) return setError("Please enter a name.");
     if (!SLUG_RE.test(slug)) return setError("The web address (slug) is invalid.");
     setSaving(true);
-    const row = { name: name.trim(), slug, image_url: image, description: description.trim() || null };
+    const row = { name: name.trim(), slug, image_url: image, description: description.trim() || null, parent_id: parentId || null };
     const { error } = category
       ? await supabase.from("categories").update(row).eq("id", category.id)
       : await supabase.from("categories").insert({ ...row, sort_order: sortOrder });
@@ -84,7 +102,25 @@ function CategoryDialog({ category, onClose, sortOrder }: { category: Category |
               }}
             />
           </Field>
-          <Field label="Background image" hint="Shown faintly behind the category tile on the home page.">
+          <Field
+            label="Parent category"
+            htmlFor="c-parent"
+            hint={
+              hasChildren
+                ? "This category has subcategories of its own, so it stays a top-level category."
+                : "Optional. Put this category inside another one — e.g. “PanelView 800” inside “HMI”. On the website it then appears when its parent is clicked."
+            }
+          >
+            <NativeSelect id="c-parent" value={parentId} onChange={(e) => setParentId(e.target.value)} disabled={hasChildren}>
+              <option value="">None — top-level category</option>
+              {parentChoices.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name}
+                </option>
+              ))}
+            </NativeSelect>
+          </Field>
+          <Field label="Background image" hint="Shown faintly behind the category tile on the home page (top-level categories only).">
             <ImageField value={image} onChange={setImage} folder={`categories/${slug || "new"}`} previewClassName="h-28 w-full" />
           </Field>
           <Field label="Description" htmlFor="c-desc" hint="Optional. Shown above the products when this category is selected.">
@@ -242,24 +278,89 @@ export default function Categories() {
     return m;
   }, [products.data]);
 
-  const list = categories.data ?? [];
-  const allDocs = list.flatMap((c) => c.documents);
-  const docsCategory = list.find((c) => c.id === docsFor);
+  const all = categories.data ?? [];
+  const allDocs = all.flatMap((c) => c.documents);
+  const docsCategory = all.find((c) => c.id === docsFor);
+  // Top-level categories in their set order (used for the home page tiles); each followed by its
+  // subcategories, alphabetically — the same way the website shows them.
+  const ids = new Set(all.map((c) => c.id));
+  const roots = all.filter((c) => !c.parent_id || !ids.has(c.parent_id));
+  const childrenOf = (id: string) =>
+    all.filter((c) => c.parent_id === id).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
 
   const reorder = async (from: number, to: number) => {
     try {
-      await saveOrder("categories", move(list, from, to).map((c) => c.id));
+      await saveOrder("categories", move(roots, from, to).map((c) => c.id));
       await refresh();
     } catch (e) {
       toast.error(friendlyError(e));
     }
   };
 
+  const row = (c: (typeof all)[number], opts: { child?: boolean; index?: number }) => {
+    const n = counts.get(c.id) ?? 0;
+    const kids = opts.child ? [] : childrenOf(c.id);
+    const inKids = kids.reduce((sum, k) => sum + (counts.get(k.id) ?? 0), 0);
+    const hidden = n + inKids === 0;
+    return (
+      <li key={c.id} className={cn("flex flex-wrap items-center gap-3 px-4 py-2.5 sm:flex-nowrap", opts.child && "bg-muted/30 pl-10")}>
+        {opts.child ? (
+          <CornerDownRight className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+        ) : (
+          <span className="h-12 w-16 shrink-0 overflow-hidden rounded-md border border-border bg-muted">
+            {c.image_url && <img src={c.image_url} alt="" loading="lazy" className="h-full w-full object-cover" />}
+          </span>
+        )}
+        <div className="min-w-0 flex-1">
+          <button type="button" onClick={() => setEditing(c)} className="block truncate text-left font-medium hover:text-primary">
+            {c.name}
+          </button>
+          <p className="text-xs text-muted-foreground">
+            <Link to={`/admin/products?category=${c.id}`} className={hidden ? "text-amber-600 hover:text-primary" : "hover:text-primary"}>
+              {n} product{n === 1 ? "" : "s"}
+              {kids.length > 0 && ` · ${kids.length} subcategor${kids.length === 1 ? "y" : "ies"} with ${inKids} more`}
+              {hidden && " · hidden on website"}
+            </Link>
+          </p>
+        </div>
+        <Button variant="outline" size="sm" onClick={() => setDocsFor(c.id)}>
+          <FileText /> {c.documents.length} doc{c.documents.length === 1 ? "" : "s"}
+        </Button>
+        {opts.child ? (
+          // Subcategories are always alphabetical, so no order buttons (keeps the columns aligned).
+          <span className="hidden w-16 sm:block" aria-hidden />
+        ) : (
+          <OrderButtons index={opts.index!} count={roots.length} onMove={(a, b) => void reorder(a, b)} />
+        )}
+        <Button variant="ghost" size="icon" aria-label={`Edit ${c.name}`} onClick={() => setEditing(c)}>
+          <Pencil />
+        </Button>
+        <ConfirmDelete
+          title={`Delete ${c.name}?`}
+          description={
+            n > 0
+              ? `${c.name} still has ${n} product(s). Move them to another category or delete them first.`
+              : kids.length > 0
+                ? `Its ${kids.length} subcategor${kids.length === 1 ? "y" : "ies"} will become top-level categories (their products stay). Its documents will be removed.`
+                : "Its documents will be removed too."
+          }
+          onConfirm={async () => {
+            const { error } = await supabase.from("categories").delete().eq("id", c.id);
+            if (error) return toast.error(friendlyError(error));
+            void removeStoredFiles([c.image_url, ...c.documents.filter((d) => !d.file_url.includes("/documents/unassigned/")).map((d) => d.file_url)]);
+            toast.success("Category deleted");
+            await refresh();
+          }}
+        />
+      </li>
+    );
+  };
+
   return (
     <>
       <PageHeader
         title="Categories"
-        description="Categories without products are hidden on the website automatically. The order here is the order of the filter buttons."
+        description="Categories without products are hidden on the website automatically. Subcategories (e.g. HMI › PanelView 800) appear on the website when their parent is clicked; the website lists categories alphabetically. The order here is the order of the category tiles on the home page."
         actions={
           <Button onClick={() => setEditing(null)}>
             <Plus /> Add category
@@ -274,56 +375,26 @@ export default function Categories() {
               <Skeleton key={i} className="h-14" />
             ))}
           </div>
-        ) : list.length === 0 ? (
+        ) : all.length === 0 ? (
           <div className="p-10 text-center text-sm text-muted-foreground">
             <FolderTree className="mx-auto mb-2 h-8 w-8 opacity-40" /> No categories yet.
           </div>
         ) : (
           <ul className="divide-y divide-border">
-            {list.map((c, i) => {
-              const n = counts.get(c.id) ?? 0;
-              return (
-                <li key={c.id} className="flex flex-wrap items-center gap-3 px-4 py-2.5 sm:flex-nowrap">
-                  <span className="h-12 w-16 shrink-0 overflow-hidden rounded-md border border-border bg-muted">
-                    {c.image_url && <img src={c.image_url} alt="" loading="lazy" className="h-full w-full object-cover" />}
-                  </span>
-                  <div className="min-w-0 flex-1">
-                    <button type="button" onClick={() => setEditing(c)} className="block truncate text-left font-medium hover:text-primary">
-                      {c.name}
-                    </button>
-                    <p className="text-xs text-muted-foreground">
-                      <Link to={`/admin/products?category=${c.id}`} className={n ? "hover:text-primary" : "text-amber-600 hover:text-primary"}>
-                        {n} product{n === 1 ? "" : "s"}
-                        {n === 0 && " · hidden on website"}
-                      </Link>
-                    </p>
-                  </div>
-                  <Button variant="outline" size="sm" onClick={() => setDocsFor(c.id)}>
-                    <FileText /> {c.documents.length} doc{c.documents.length === 1 ? "" : "s"}
-                  </Button>
-                  <OrderButtons index={i} count={list.length} onMove={(a, b) => void reorder(a, b)} />
-                  <Button variant="ghost" size="icon" aria-label={`Edit ${c.name}`} onClick={() => setEditing(c)}>
-                    <Pencil />
-                  </Button>
-                  <ConfirmDelete
-                    title={`Delete ${c.name}?`}
-                    description={n > 0 ? `${c.name} still has ${n} product(s). Move them to another category or delete them first.` : "Its documents will be removed too."}
-                    onConfirm={async () => {
-                      const { error } = await supabase.from("categories").delete().eq("id", c.id);
-                      if (error) return toast.error(friendlyError(error));
-                      void removeStoredFiles([c.image_url, ...c.documents.filter((d) => !d.file_url.includes("/documents/unassigned/")).map((d) => d.file_url)]);
-                      toast.success("Category deleted");
-                      await refresh();
-                    }}
-                  />
-                </li>
-              );
-            })}
+            {roots.flatMap((c, i) => [row(c, { index: i }), ...childrenOf(c.id).map((k) => row(k, { child: true }))])}
           </ul>
         )}
       </div>
 
-      {editing !== undefined && <CategoryDialog key={editing?.id ?? "new"} category={editing} onClose={() => setEditing(undefined)} sortOrder={nextSortOrder(list)} />}
+      {editing !== undefined && (
+        <CategoryDialog
+          key={editing?.id ?? "new"}
+          category={editing}
+          categories={all}
+          onClose={() => setEditing(undefined)}
+          sortOrder={nextSortOrder(roots)}
+        />
+      )}
       {docsCategory && <DocumentsDialog category={docsCategory} allDocs={allDocs} onClose={() => setDocsFor(null)} />}
     </>
   );

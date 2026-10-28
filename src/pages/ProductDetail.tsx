@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { Link, Navigate, useParams } from "react-router";
 import { AnimatePresence, m } from "framer-motion";
 import { ArrowLeft, ChevronRight, Download, FileText, Package } from "lucide-react";
-import { isUuid, useBrandProducts, useCategoryDocuments, useProduct } from "@/lib/queries";
+import { isUuid, useCategories, useCategoryDocuments, useProduct, useRelatedProducts } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import { absoluteUrl, breadcrumbs, useSeo } from "@/hooks/use-seo";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -93,8 +93,17 @@ function DetailSkeleton() {
 export default function ProductDetail() {
   const { slug } = useParams();
   const { data: product, isPending, isError, refetch } = useProduct(slug);
-  const related = useBrandProducts(product?.brand_id);
+  const related = useRelatedProducts(product);
   const docs = useCategoryDocuments(product?.category_id);
+  // The category's parent (e.g. HMI for PanelView 800), for the breadcrumb and labels.
+  const categories = useCategories();
+  const parentCategory =
+    product?.category?.parent_id ? (categories.data?.find((c) => c.id === product.category!.parent_id) ?? null) : null;
+  const categoryLabel = product?.category
+    ? parentCategory
+      ? `${parentCategory.name} ${product.category.name}`
+      : product.category.name
+    : null;
 
   const blurb = product ? summary(product.description) : null;
 
@@ -129,13 +138,16 @@ export default function ProductDetail() {
               description: product.description?.trim() || description,
               ...(images.length > 0 && { image: images.map((i) => absoluteUrl(i.url)) }),
               ...(product.brand && { brand: { "@type": "Brand", name: product.brand.name } }),
-              ...(product.category && { category: product.category.name }),
+              ...(product.category && {
+                category: parentCategory ? `${parentCategory.name} > ${product.category.name}` : product.category.name,
+              }),
               sku: product.name,
               url: absoluteUrl(path),
             },
             breadcrumbs([
               ["Home", "/"],
               ["Products", "/products"],
+              ...(parentCategory ? [[parentCategory.name, `/products?cat=${parentCategory.slug}`] as [string, string]] : []),
               ...(product.category
                 ? [[product.category.name, `/products?cat=${product.category.slug}`] as [string, string]]
                 : []),
@@ -146,12 +158,7 @@ export default function ProductDetail() {
       : null,
   );
 
-  const relatedProducts = useMemo(() => {
-    if (!product || !related.data) return [];
-    const others = related.data.filter((p) => p.id !== product.id);
-    const sameCat = others.filter((p) => p.category_id === product.category_id);
-    return (sameCat.length ? sameCat : others).slice(0, 4);
-  }, [product, related.data]);
+  const relatedProducts = related.data ?? [];
 
   if (isPending) return <DetailSkeleton />;
   if (isError)
@@ -183,6 +190,14 @@ export default function ProductDetail() {
           <Link to="/products" className="flex items-center gap-1 transition-colors hover:text-primary">
             <ArrowLeft className="h-3 w-3" /> Products
           </Link>
+          {parentCategory && (
+            <>
+              <ChevronRight className="h-3 w-3" />
+              <Link to={`/products?cat=${parentCategory.slug}`} className="transition-colors hover:text-primary">
+                {parentCategory.name}
+              </Link>
+            </>
+          )}
           {product.category && (
             <>
               <ChevronRight className="h-3 w-3" />
@@ -202,7 +217,7 @@ export default function ProductDetail() {
               <Gallery key={product.id} images={images} name={product.name} />
 
               <div className="mb-2 flex flex-wrap items-center gap-3">
-                {product.category && <span className="font-mono text-xs text-primary">{product.category.name}</span>}
+                {categoryLabel && <span className="font-mono text-xs text-primary">{categoryLabel}</span>}
                 {product.brand && <span className="font-mono text-xs text-muted-foreground">by {product.brand.name}</span>}
               </div>
               <h1 className="mb-2 mt-2 break-words text-2xl font-black leading-tight sm:text-3xl lg:text-4xl">{product.name}</h1>

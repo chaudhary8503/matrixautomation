@@ -221,13 +221,10 @@ async function run(browser, mode) {
       const { page, problems } = await open(desktop, origin, "/");
       await settled(page, "home");
       await clickTo(page, 'main a[href="/products"]', /^\/products$/, "home → products");
-      // Category filter (stays on the page, changes ?cat=)
-      const chip = page.locator('main [role="group"] button').nth(1);
-      if (await chip.count()) {
-        await chip.click();
-        await page.waitForURL((u) => u.searchParams.has("cat"), { timeout: TIMEOUT });
-        await settled(page, "category filter");
-      }
+      // Category sidebar (stays on the page, changes ?cat=)
+      await page.locator('nav[aria-label="Product categories"] a[href*="cat="]').first().click();
+      await page.waitForURL((u) => u.searchParams.has("cat"), { timeout: TIMEOUT });
+      await settled(page, "category filter");
       const product = await clickTo(page, 'main a[href^="/products/"]', /^\/products\/.+/, "products → product");
       await clickTo(page, 'main a[href^="/brands/"]', /^\/brands\/.+/, "product → brand");
       await page.goBack();
@@ -240,6 +237,74 @@ async function run(browser, mode) {
     });
 
     // Starting on a product and a brand page (both prerendered), then navigating.
+    // Pagination, the category tree (subcategories appear only under their selected parent), search.
+    await scenario(`${tag} desktop: products pagination, category tree, search`, async () => {
+      const { page, problems } = await open(desktop, origin, "/products");
+      await settled(page, "products");
+      const firstOnPage1 = await page.locator("main h3").first().textContent();
+      await clickTo(page, 'nav[aria-label="Pagination"] a[aria-label="Next page"]', /^\/products$/, "next page");
+      if (new URL(page.url()).searchParams.get("page") !== "2") throw new Error(`"Next page" went to ${page.url()}`);
+      await page.waitForFunction((t) => document.querySelector("main h3")?.textContent !== t, firstOnPage1, { timeout: TIMEOUT });
+
+      const sidebar = page.locator('nav[aria-label="Product categories"]');
+      const parent = sidebar.locator("a[data-has-children]").first();
+      if (await parent.count()) {
+        // Before: no subcategories open. After clicking the parent: its subcategories appear.
+        if (await sidebar.locator("ul ul a").count()) throw new Error("subcategories visible before choosing a parent");
+        await parent.click();
+        await page.waitForURL((u) => u.searchParams.has("cat") && !u.searchParams.has("page"), { timeout: TIMEOUT });
+        await settled(page, "parent category");
+        const child = sidebar.locator("ul ul a").first();
+        await child.waitFor({ state: "visible", timeout: TIMEOUT });
+        const childHref = await child.getAttribute("href");
+        await child.click();
+        await page.waitForURL((u) => `${u.pathname}${u.search}` === childHref, { timeout: TIMEOUT });
+        await settled(page, "subcategory");
+        if ((await sidebar.locator('ul ul a[aria-current="page"]').count()) !== 1) throw new Error("selected subcategory not shown inside its parent");
+        // Another top-level category closes the parent again.
+        await sidebar.locator(":scope > ul > li > a:not([data-has-children])").nth(1).click();
+        await page.waitForFunction(() => !document.querySelector('nav[aria-label="Product categories"] ul ul'), null, { timeout: TIMEOUT });
+        await settled(page, "other category");
+      }
+
+      // Search narrows the list and resets to page 1.
+      const name = (await page.locator("main h3").first().textContent())?.trim() ?? "";
+      await page.locator('main input[aria-label="Search products"]').fill(name.split(/\s+/)[0]);
+      await page.waitForURL((u) => u.searchParams.has("q"), { timeout: TIMEOUT });
+      await settled(page, "search");
+      if (!(await page.locator("main h3").count())) throw new Error(`search for "${name.split(/\s+/)[0]}" found nothing`);
+      assertClean(problems, page, "products pagination");
+      await page.close();
+    });
+
+    await scenario(`${tag} desktop: brand page sidebar + pagination`, async () => {
+      // The brand with the most products (it has a sidebar and several pages).
+      const { page: list } = await open(desktop, origin, "/brands");
+      await settled(list, "brands");
+      const brands = await list.locator('main a[href^="/brands/"]').evaluateAll((els) =>
+        els.map((a) => ({ href: a.getAttribute("href"), n: Number.parseInt(a.textContent?.match(/(\d[\d,]*) product/)?.[1]?.replace(/,/g, "") ?? "0", 10) })),
+      );
+      await list.close();
+      const top = brands.sort((a, b) => b.n - a.n)[0];
+      const { page, problems } = await open(desktop, origin, top.href);
+      await settled(page, top.href);
+      const sidebar = page.locator('nav[aria-label$="product categories"]');
+      if (await sidebar.count()) {
+        await sidebar.locator('a[href*="cat="]').first().click();
+        await page.waitForURL((u) => u.searchParams.has("cat"), { timeout: TIMEOUT });
+        await settled(page, "brand category");
+        await sidebar.locator("a").first().click(); // "All <brand> products"
+        await page.waitForURL((u) => !u.searchParams.has("cat"), { timeout: TIMEOUT });
+        await settled(page, "brand all");
+      }
+      if (top.n > 48) {
+        await clickTo(page, 'nav[aria-label="Pagination"] a[aria-label="Page 2"]', /^\/brands\/.+/, "brand page 2");
+        if (new URL(page.url()).searchParams.get("page") !== "2") throw new Error(`brand page 2 went to ${page.url()}`);
+      }
+      assertClean(problems, page, "brand page");
+      await page.close();
+    });
+
     await scenario(`${tag} desktop: start on product / brand page, then navigate`, async () => {
       for (const [start, re] of [
         ["product", /^\/products\/.+/],
@@ -261,6 +326,15 @@ async function run(browser, mode) {
     await scenario(`${tag} mobile: menu, search, product`, async () => {
       const { page, problems } = await open(mobile, origin, "/");
       await settled(page, "mobile home");
+      // Category list folds away behind a button on phones.
+      const { page: cats } = await open(mobile, origin, "/products");
+      await settled(cats, "mobile products");
+      await cats.locator("main button[aria-expanded]").first().click();
+      await cats.locator('nav[aria-label="Product categories"] a[href*="cat="]').first().click();
+      await cats.waitForURL((u) => u.searchParams.has("cat"), { timeout: TIMEOUT });
+      await settled(cats, "mobile category");
+      await cats.close();
+
       await page.getByRole("button", { name: "Open menu" }).click();
       await clickTo(page, 'nav[aria-label="Mobile"] a[href="/brands"]', /^\/brands$/, "mobile menu → brands");
       // Header search: type part of a real product name, open the first hit.

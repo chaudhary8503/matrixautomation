@@ -2,6 +2,9 @@
 export function friendlyError(err: unknown): string {
   const e = err as { code?: string; message?: string; details?: string; statusCode?: string | number } | null;
   const msg = e?.message ?? String(err);
+  // Rules of the category tree (migration 003), already worded for people.
+  const tree = msg.match(/category_tree:\s*(.+)/);
+  if (tree) return tree[1].charAt(0).toUpperCase() + tree[1].slice(1) + ".";
   switch (e?.code) {
     case "23505":
       if (/slug/i.test(msg + (e.details ?? ""))) return "That web address (slug) is already used by another item. Choose a different one.";

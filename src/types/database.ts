@@ -33,6 +33,8 @@ type CategoryRow = {
   image_url: string | null;
   description: string | null;
   sort_order: number;
+  /** Parent category (one level deep), e.g. "PanelView 800" → "HMI". Migration 003. */
+  parent_id: string | null;
 } & Timestamps;
 
 type ProductRow = {
@@ -217,6 +219,34 @@ export type Database = {
       user_roles: Table<UserRoleRow, "id" | "created_at">;
     };
     Views: {
+      /** One row per product with brand/category names and a search column (migration 003). */
+      product_cards: {
+        Row: {
+          id: string;
+          name: string;
+          slug: string;
+          description: string | null;
+          image_url: string | null;
+          sort_order: number;
+          is_published: boolean;
+          brand_id: string;
+          brand_name: string | null;
+          brand_slug: string | null;
+          category_id: string;
+          category_name: string | null;
+          category_slug: string | null;
+          category_sort_order: number | null;
+          category_parent_id: string | null;
+          category_parent_name: string | null;
+          search_text: string;
+        };
+        Relationships: [];
+      };
+      /** Published products per category (migration 003). */
+      category_counts: {
+        Row: { category_id: string; product_count: number };
+        Relationships: [];
+      };
       brand_categories: {
         Row: {
           brand_id: string;

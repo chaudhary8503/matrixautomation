@@ -38,7 +38,9 @@ export default function Dashboard() {
   const noLogo = (brands.data ?? []).filter((b) => !b.logo_url);
   if (noLogo.length) issues.push({ text: `Brands without a logo: ${noLogo.map((b) => b.name).join(", ")}`, to: "/admin/brands" });
   if (products.data && categories.data) {
-    const emptyCats = categories.data.filter((c) => !usedCats.has(c.id));
+    // A parent counts as used when any of its subcategories has products (it shows on the website).
+    const used = (id: string) => usedCats.has(id) || categories.data.some((c) => c.parent_id === id && usedCats.has(c.id));
+    const emptyCats = categories.data.filter((c) => !used(c.id));
     if (emptyCats.length) issues.push({ text: `${emptyCats.length} categor${emptyCats.length === 1 ? "y has" : "ies have"} no products (hidden on the website): ${emptyCats.map((c) => c.name).join(", ")}`, to: "/admin/categories" });
   }
   if (products.data && brands.data) {

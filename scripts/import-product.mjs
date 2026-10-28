@@ -33,6 +33,9 @@
  *                        script picks up the wrong links. Default: Moore model pages.
  *      --max 200         safety limit on how many products to open
  *      --yes             don't ask before uploading
+ *      --more-text "<text>"  the label of the site's "show more" button, if it isn't
+ *                        "Show more" / "Load more" / "View all" (a regular expression)
+ *      --no-more         don't click "show more" buttons
  *
  * Needs: VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY in .env (already there),
  *        Playwright's Chromium (npx playwright install chromium – once).
@@ -58,7 +61,7 @@ const positional = () => {
   const out = [];
   for (let i = 1; i < args.length; i++) {
     if (args[i].startsWith("--")) {
-      if (["out", "list", "brand", "category", "match", "max"].includes(args[i].slice(2))) i++;
+      if (["out", "list", "brand", "category", "match", "max", "more-text"].includes(args[i].slice(2))) i++;
       continue;
     }
     out.push(args[i]);
@@ -66,14 +69,14 @@ const positional = () => {
   return out;
 };
 
-const log = (...m) => console.log(...m);
-const die = (msg) => {
+export const log = (...m) => console.log(...m);
+export const die = (msg) => {
   console.error(`\n✖ ${msg}\n`);
   process.exit(1);
 };
 
 /** Same rules as the admin panel and the database check. */
-function slugify(s) {
+export function slugify(s) {
   return (
     String(s)
       .normalize("NFKD")
@@ -89,7 +92,7 @@ function slugify(s) {
   );
 }
 
-function loadEnv() {
+export function loadEnv() {
   const file = path.resolve(".env");
   if (existsSync(file)) {
     for (const line of readFileSync(file, "utf8").split(/\r?\n/)) {
@@ -103,7 +106,7 @@ function loadEnv() {
   return { url, key };
 }
 
-function ask(question, { hidden = false } = {}) {
+export function ask(question, { hidden = false } = {}) {
   return new Promise((resolve) => {
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true });
     if (hidden) {
@@ -201,27 +204,48 @@ function scrapeInPage() {
     if (list && /^(UL|OL)$/.test(list.tagName)) for (const li of list.querySelectorAll("li")) features.push(clean(li.textContent));
   }
 
-  // Images: product photos, not logos/icons
-  const images = [];
-  const addImg = (src) => {
-    if (!src) return;
+  // Images: product photos first; logos, icons and site graphics left out.
+  const LOGO_RE = /logo|worldwide|brand-mark|icon|sprite|spinner|progress|loading|print_page|email_go|3d-icon|video-thumb|flag|banner|badge|social|facebook|linkedin|twitter|youtube/i;
+  const isHomeLink = (a) => {
+    if (!a) return false;
     try {
-      const abs = new URL(src, location.href).href;
-      if (/logo|icon|sprite|spinner|progress|loading|print_page|email_go|3d-icon|video-thumb|flag|banner/i.test(abs)) return;
-      if (!/\.(jpe?g|png|webp|gif)(\?|$)/i.test(abs)) return;
-      if (!images.includes(abs)) images.push(abs);
-    } catch {}
+      const u = new URL(a.getAttribute("href"), location.href);
+      return u.origin === location.origin && (u.pathname === "/" || /^\/(index\.html?)?$/i.test(u.pathname));
+    } catch {
+      return false;
+    }
   };
-  if (ogImage) addImg(ogImage);
+  const candidates = new Map(); // url -> score
+  const addImg = (src, { el, score = 0 } = {}) => {
+    if (!src) return;
+    let abs;
+    try {
+      abs = new URL(src, location.href).href;
+    } catch {
+      return;
+    }
+    if (!/\.(jpe?g|png|webp|gif)(\?|$)/i.test(abs)) return;
+    if (LOGO_RE.test(abs.split(/[?#]/)[0].split("/").slice(-2).join("/"))) return; // logo-ish file name
+    if (el) {
+      if (inChrome(el) || isHomeLink(el.closest("a"))) return; // header logo / link to home page
+      if (LOGO_RE.test(`${el.getAttribute("alt") ?? ""} ${el.className ?? ""} ${el.id ?? ""}`)) return;
+      const r = el.getBoundingClientRect();
+      score += Math.min(50, Math.round((r.width * r.height) / 5000)); // bigger = more likely the product photo
+    }
+    if (/\/products?\//i.test(abs)) score += 100; // e.g. /images/products/TDZ3-bh.jpg
+    candidates.set(abs, Math.max(candidates.get(abs) ?? -Infinity, score));
+  };
   for (const img of document.querySelectorAll("img")) {
-    if (inChrome(img)) continue;
     const w = img.naturalWidth || img.width;
     const src = img.currentSrc || img.src || img.getAttribute("data-src");
-    if (/\/products?\//i.test(src) || w >= 150) addImg(src);
+    if (/\/products?\//i.test(src ?? "") || w >= 150) addImg(src, { el: img });
   }
   for (const a of document.querySelectorAll("a[href]")) {
-    if (/\.(jpe?g|png|webp)(\?|$)/i.test(a.href) && /\/products?\//i.test(a.href)) addImg(a.href);
+    if (/\.(jpe?g|png|webp)(\?|$)/i.test(a.href) && /\/products?\//i.test(a.href)) addImg(a.href, { el: a, score: 5 });
   }
+  // The share image is often the site logo, so it only counts if nothing better exists.
+  if (ogImage) addImg(ogImage, { score: -20 });
+  const images = [...candidates.entries()].sort((x, y) => y[1] - x[1]).map(([u]) => u);
 
   // PDFs: datasheets / manuals
   const pdfs = [];
@@ -234,7 +258,7 @@ function scrapeInPage() {
   return { h1, model, descParts, features, specs, images, pdfs, title: document.title };
 }
 
-async function launchBrowser() {
+export async function launchBrowser() {
   let chromium;
   try {
     ({ chromium } = await import("playwright"));
@@ -264,6 +288,50 @@ async function loadPage(page, url) {
     window.scrollTo(0, 0);
   });
   await page.waitForTimeout(1000);
+}
+
+/**
+ * Listing pages often show the first ~15 products with a "Show more" / "Load more" button.
+ * Keep clicking it until it disappears or no new products appear.
+ */
+async function expandListing(page, matchRe) {
+  const custom = option("more-text");
+  const textRe = custom ? new RegExp(custom, "i") : /^\s*(show|load|view|see)\s+(\d+\s+)?(more|all)\b|^\s*more\s+(products|results|items)\b|^\s*next\s+\d+\b/i;
+  let clicks = 0;
+  let count = (await productLinks(page, matchRe)).length;
+  for (let round = 0; round < 100; round++) {
+    const button = page
+      .locator("button, a, [role=button], input[type=button], input[type=submit], span, div")
+      .filter({ hasText: textRe })
+      .filter({ visible: true })
+      .last();
+    if (!(await button.count())) break;
+    // Skip big containers that merely include the text; we want the actual button.
+    const small = await button.evaluate((el) => el.textContent.trim().length < 40).catch(() => false);
+    if (!small) break;
+    try {
+      await button.scrollIntoViewIfNeeded({ timeout: 5000 });
+      await button.click({ timeout: 10_000 });
+    } catch {
+      break;
+    }
+    clicks++;
+    // Wait for new products to appear (up to ~15 s), then continue.
+    let grew = false;
+    for (let i = 0; i < 30; i++) {
+      await page.waitForTimeout(500);
+      const now = (await productLinks(page, matchRe)).length;
+      if (now > count) {
+        count = now;
+        grew = true;
+        await page.waitForTimeout(500);
+        break;
+      }
+    }
+    log(`  clicked "show more" (${clicks}) — ${count} product link(s) so far`);
+    if (!grew) break;
+  }
+  return clicks;
 }
 
 const DEFAULT_PRODUCT_LINK = /\/catalog\/[^/?#]+\/[^/?#]*_[^/?#]*$/i; // Moore model pages, e.g. /catalog/tdz3/TDZ3_PRG_..._temp
@@ -306,6 +374,7 @@ async function extractUrls(page, urls, { out, debug, follow, matchRe }) {
       // A product FAMILY page lists several models and has no single model number.
       // It isn't a product itself: open its models instead (or save the list).
       if (!d.model) {
+        if (follow && !flag("no-more")) await expandListing(page, matchRe);
         const variants = await productLinks(page, matchRe);
         if (variants.length) {
           if (follow) {
@@ -399,6 +468,7 @@ async function importAll() {
     await browser.close();
     die(`Could not open ${startUrl}: ${e.message.split("\n")[0]}`);
   }
+  if (!flag("no-more")) await expandListing(page, matchRe);
   let links = await productLinks(page, matchRe);
   if (!links.length) {
     // Maybe the page itself is a single product.
@@ -452,7 +522,7 @@ async function importAll() {
 
 const MIME = { jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", webp: "image/webp", gif: "image/gif", pdf: "application/pdf" };
 
-async function download(url, maxBytes) {
+export async function download(url, maxBytes) {
   const res = await fetch(url, { headers: { "user-agent": "Mozilla/5.0 (Matrix catalogue import)" } });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const buf = Buffer.from(await res.arrayBuffer());
@@ -478,7 +548,7 @@ async function upload() {
   });
 }
 
-async function uploadItems(items, { brandArg: brandSlug, categoryArg: categorySlug, dry, publish, update }) {
+export async function uploadItems(items, { brandArg: brandSlug, categoryArg: categorySlug, dry, publish, update, createCategories = false, downloader = download }) {
   const { url, key } = loadEnv();
   const supabase = createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false } });
 
@@ -499,21 +569,66 @@ async function uploadItems(items, { brandArg: brandSlug, categoryArg: categorySl
     return hit;
   };
   const brand = await pick("brands", brandSlug, "Brand");
-  const category = await pick("categories", categorySlug, "Category");
-  log(`\nBrand: ${brand.name}   Category: ${category.name}   ${dry ? "(DRY RUN — nothing will change)" : ""}`);
+
+  // Categories: one for the whole run (--category), or per product (item.category),
+  // optionally created when missing (used by the Rockwell importer: "HMI - PanelView Plus 7" …).
+  const { data: catRows, error: catErr } = await supabase.from("categories").select("id, name, slug, sort_order").order("name");
+  if (catErr) die(`Could not load categories: ${catErr.message}`);
+  const findCat = (wanted) => catRows.find((r) => r.slug === wanted) ?? catRows.find((r) => norm(r.slug) === norm(wanted) || norm(r.name) === norm(wanted));
+  const defaultCategory = categorySlug ? findCat(categorySlug) : null;
+  if (categorySlug && !defaultCategory && !createCategories)
+    die(`Category "${categorySlug}" not found. Use one of these:\n${catRows.map((r) => `   ${r.slug.padEnd(40)} (${r.name})`).join("\n")}`);
+  let catSort = Math.max(0, ...catRows.map((r) => r.sort_order ?? 0)) + 10;
+  const createdCats = [];
+  const resolveCategory = async (wanted) => {
+    if (!wanted) return defaultCategory;
+    const hit = findCat(wanted);
+    if (hit) return hit;
+    if (!createCategories) throw new Error(`category "${wanted}" does not exist`);
+    const row = { name: String(wanted).trim(), slug: slugify(wanted), sort_order: catSort };
+    catSort += 10;
+    if (dry) {
+      const fake = { ...row, id: `(new) ${row.slug}` };
+      catRows.push(fake);
+      createdCats.push(row.name);
+      log(`  + would create category "${row.name}"`);
+      return fake;
+    }
+    const { data, error } = await supabase.from("categories").insert(row).select("id, name, slug, sort_order").single();
+    if (error) throw new Error(`could not create category "${row.name}": ${error.message}`);
+    catRows.push(data);
+    createdCats.push(data.name);
+    log(`  + created category "${data.name}"`);
+    return data;
+  };
+  log(`\nBrand: ${brand.name}   Category: ${defaultCategory ? defaultCategory.name : categorySlug ? `${categorySlug} (new)` : "per product"}   ${dry ? "(DRY RUN — nothing will change)" : ""}`);
 
   const { data: last } = await supabase.from("products").select("sort_order").order("sort_order", { ascending: false }).limit(1);
   let sortOrder = (last?.[0]?.sort_order ?? 0) + 10;
 
   const stamp = () => Date.now().toString(36);
   const stored = new Map(); // source URL -> our URL, so a shared photo/datasheet is uploaded once
+  const failed = new Map(); // source URL -> error, so a broken shared file isn't retried for every product
   const storeFile = async (bucket, folder, srcUrl, baseName) => {
     if (stored.has(srcUrl)) return stored.get(srcUrl);
-    const { buf, ext, type } = await download(srcUrl, bucket === "images" ? 5 * 1048576 : 20 * 1048576);
+    if (failed.has(srcUrl)) throw failed.get(srcUrl);
+    try {
+      return await storeFileOnce(bucket, folder, srcUrl, baseName);
+    } catch (e) {
+      failed.set(srcUrl, e);
+      throw e;
+    }
+  };
+  const storeFileOnce = async (bucket, folder, srcUrl, baseName) => {
+    const { buf, ext, type } = await downloader(srcUrl, bucket === "images" ? 5 * 1048576 : 20 * 1048576);
     if (bucket === "images" && !type.startsWith("image/")) throw new Error(`not an image (${type})`);
     if (bucket === "documents" && type !== "application/pdf") throw new Error(`not a PDF (${type})`);
     const p = `${folder}/${stamp()}-${slugify(baseName).slice(0, 50)}.${ext}`;
-    if (dry) return `(would upload ${srcUrl} → ${bucket}/${p})`;
+    if (dry) {
+      const planned = `(would upload ${srcUrl} → ${bucket}/${p})`;
+      stored.set(srcUrl, planned);
+      return planned;
+    }
     const { error } = await supabase.storage.from(bucket).upload(p, buf, { contentType: type, cacheControl: "31536000", upsert: false });
     if (error) throw error;
     const publicUrl = supabase.storage.from(bucket).getPublicUrl(p).data.publicUrl;
@@ -562,6 +677,8 @@ async function uploadItems(items, { brandArg: brandSlug, categoryArg: categorySl
         .map((s) => ({ label: String(s.label ?? "").trim(), value: String(s.value ?? "").trim() }))
         .filter((s) => s.label && s.value);
 
+      const category = await resolveCategory(item.category || categorySlug);
+      if (!category) throw new Error("no category given");
       const row = {
         name,
         slug,
@@ -599,8 +716,13 @@ async function uploadItems(items, { brandArg: brandSlug, categoryArg: categorySl
         log(`  ✔ created as ${publish ? "PUBLISHED" : "HIDDEN (publish it in Admin → Products after checking)"} — ${specs.length} specs, ${imageUrls.length} image(s)${datasheetUrl ? ", datasheet" : ""}`);
       }
 
-      // Extra photos go to the gallery (skip ones already there).
+      // Extra photos go to the gallery. When updating, the gallery is replaced, so photos
+      // from an earlier import (e.g. a logo picked up by mistake) don't linger.
       const extra = imageUrls.slice(1);
+      if (existing && imageUrls.length) {
+        const { error } = await supabase.from("product_images").delete().eq("product_id", productId);
+        if (error) log(`  ! old gallery not cleared: ${error.message}`);
+      }
       if (extra.length) {
         const { data: have } = await supabase.from("product_images").select("url, sort_order").eq("product_id", productId);
         let so = Math.max(0, ...(have ?? []).map((h) => h.sort_order)) + 10;
@@ -618,6 +740,7 @@ async function uploadItems(items, { brandArg: brandSlug, categoryArg: categorySl
   }
 
   await supabase.auth.signOut();
+  if (createdCats.length) log(`\nCategories ${dry ? "that would be " : ""}created: ${createdCats.join(", ")}`);
   log(`\nDone — created ${summary.created}, updated ${summary.updated}, skipped ${summary.skipped}, failed ${summary.failed}${dry ? " (dry run)" : ""}.`);
   if (!dry && summary.created && !publish) log("New products are HIDDEN. Check them in Admin → Products (filter: Hidden), then switch Published on.");
   log("");
@@ -625,7 +748,12 @@ async function uploadItems(items, { brandArg: brandSlug, categoryArg: categorySl
 
 /* --------------------------------------------------------------------- main */
 
-if (command === "extract") await extract();
+import { pathToFileURL } from "node:url";
+const runDirectly = process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
+
+if (!runDirectly) {
+  // imported by another script (e.g. import-rockwell.mjs): don't run the CLI
+} else if (command === "extract") await extract();
 else if (command === "upload") await upload();
 else if (command === "import-all") await importAll();
 else {

@@ -23,6 +23,7 @@ import { ConfirmDelete } from "../components/ConfirmDelete";
 import { SLUG_RE, slugify } from "../slug";
 import { removeStoredFiles } from "../storage";
 import { friendlyError } from "../errors";
+import { categoryOptions } from "../categories";
 
 type Form = {
   name: string;
@@ -264,9 +265,9 @@ export default function ProductEdit() {
                 <Field label="Category" htmlFor="category" required>
                   <NativeSelect id="category" value={form.category_id} onChange={(e) => set("category_id", e.target.value)}>
                     <option value="">Choose a category…</option>
-                    {categories.data?.map((c) => (
+                    {categoryOptions(categories.data ?? []).map((c) => (
                       <option key={c.id} value={c.id}>
-                        {c.name}
+                        {c.label}
                       </option>
                     ))}
                   </NativeSelect>

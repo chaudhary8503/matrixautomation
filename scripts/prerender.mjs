@@ -30,14 +30,17 @@ const SLUG_RE = /^[a-z0-9][a-z0-9._~-]*$/i;
 // entries may ever be embedded in a snapshot. Never admin, auth, search or inquiry data.
 const PUBLIC_QUERY_KEYS = new Set([
   "site_settings",
-  "catalog",
   "categories",
   "brands",
   "brand",
   "brand_categories",
-  "brand_products",
   "category_documents",
   "product",
+  "product_page", // one page (48) of the product list
+  "related_products",
+  "category_counts",
+  "search_category_counts",
+  "brand_counts",
   "industries",
   "logo_box",
 ]);
@@ -176,19 +179,30 @@ async function waitUntilSettled(page) {
   );
 }
 
+/** Non-fatal issues (e.g. a product photo that failed to download), listed at the end. */
+const warnings = new Set();
+
 /** Logo measurements collected from every page: logo URL → box (written to dist/logo-boxes.json). */
 const logoBoxes = new Map();
 
 async function snapshot(context, origin, route) {
   const page = await context.newPage();
   const problems = [];
+  // Data requests (the REST API) must succeed — the snapshot is built from them. A product photo
+  // that fails to download doesn't change the HTML, so it is only a warning.
+  const isApi = (url) => url.startsWith(`${SUPABASE_URL}/rest/`);
   const isSupabase = (url) => url.startsWith(SUPABASE_URL);
   page.on("pageerror", (err) => problems.push(`JavaScript error: ${err.message}`));
   page.on("requestfailed", (r) => {
-    if (isSupabase(r.url())) problems.push(`Supabase request failed (${r.failure()?.errorText}): ${r.url()}`);
+    const msg = `Supabase request failed (${r.failure()?.errorText}): ${r.url()}`;
+    if (isApi(r.url())) problems.push(msg);
+    else if (isSupabase(r.url())) warnings.add(msg);
   });
   page.on("response", (r) => {
-    if (isSupabase(r.url()) && r.status() >= 400) problems.push(`Supabase answered ${r.status()}: ${r.url()}`);
+    if (r.status() < 400) return;
+    const msg = `Supabase answered ${r.status()}: ${r.url()}`;
+    if (isApi(r.url())) problems.push(msg);
+    else if (isSupabase(r.url())) warnings.add(msg);
   });
 
   try {
@@ -359,7 +373,19 @@ async function main() {
     const queue = [...entries];
     const worker = async () => {
       for (let next = queue.shift(); next; next = queue.shift()) {
-        await snapshot(context, origin, next.route);
+        // Thousands of pages means tens of thousands of requests: one network hiccup shouldn't
+        // throw the whole run away. A failing page is tried up to 3 times; a real problem (error
+        // state, 404, missing data) fails every time and still stops the run.
+        for (let attempt = 1; ; attempt++) {
+          try {
+            await snapshot(context, origin, next.route);
+            break;
+          } catch (err) {
+            if (attempt >= 3) throw err;
+            log(`retrying ${next.route} (attempt ${attempt + 1} of 3): ${String(err.message ?? err).split("\n")[0]}`);
+            await new Promise((r) => setTimeout(r, 3000 * attempt));
+          }
+        }
         done++;
         if (done % 10 === 0 || done === entries.length) log(`${done}/${entries.length} pages`);
       }
@@ -376,6 +402,8 @@ async function main() {
   await writeFile(path.join(DIST, "logo-boxes.json"), JSON.stringify(boxes));
 
   // 6. Summary.
+  for (const w of [...warnings].slice(0, 10)) console.warn(`[prerender] warning (not blocking): ${w}`);
+  if (warnings.size > 10) console.warn(`[prerender] … and ${warnings.size - 10} more warnings`);
   log(`done: ${done} pages + sitemap.xml (${entries.length} URLs) + ${logoBoxes.size} logo measurements in ${((Date.now() - started) / 1000).toFixed(1)}s`);
 }
 

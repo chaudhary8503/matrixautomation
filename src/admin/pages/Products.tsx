@@ -12,6 +12,7 @@ import { useSeo } from "@/hooks/use-seo";
 import { useAdminBrands, useAdminCategories, useAdminProducts, useRefreshAll, type AdminProductRow } from "../api";
 import { PageHeader } from "../components/PageHeader";
 import { friendlyError } from "../errors";
+import { categoryOptions, withSubcategories } from "../categories";
 
 const FILTERS: Record<string, { label: string; test: (p: AdminProductRow) => boolean }> = {
   hidden: { label: "Hidden (not published)", test: (p) => !p.is_published },
@@ -42,16 +43,22 @@ export default function Products() {
       return next;
     });
 
+  // Filtering by a parent category (e.g. HMI) includes its subcategories.
+  const inCategory = useMemo(
+    () => new Set(category ? withSubcategories(categories.data ?? [], category) : []),
+    [categories.data, category],
+  );
+
   const rows = useMemo(() => {
     const t = term.trim().toLowerCase();
     return (products.data ?? []).filter(
       (p) =>
         (!brand || p.brand_id === brand) &&
-        (!category || p.category_id === category) &&
+        (!category || inCategory.has(p.category_id)) &&
         (!filter || !FILTERS[filter] || FILTERS[filter].test(p)) &&
         (!t || p.name.toLowerCase().includes(t) || p.slug.includes(t)),
     );
-  }, [products.data, brand, category, filter, term]);
+  }, [products.data, brand, category, filter, term, inCategory]);
 
   const togglePublished = async (p: AdminProductRow, value: boolean) => {
     setBusyId(p.id);
@@ -91,9 +98,9 @@ export default function Products() {
         </NativeSelect>
         <NativeSelect value={category} onChange={(e) => setParam("category", e.target.value)} aria-label="Filter by category">
           <option value="">All categories</option>
-          {categories.data?.map((c) => (
+          {categoryOptions(categories.data ?? []).map((c) => (
             <option key={c.id} value={c.id}>
-              {c.name}
+              {c.label}
             </option>
           ))}
         </NativeSelect>

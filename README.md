@@ -209,3 +209,30 @@ adds a database trigger that rejects new inquiries when:
 
 Run it once in **Supabase → SQL Editor** (safe to run again). The forms then show "Too many
 messages right now…" or "We already have this message" instead of a generic error.
+
+## Product catalogue: pages, search and subcategories
+
+[supabase/migrations/003_category_tree_and_product_search.sql](supabase/migrations/003_category_tree_and_product_search.sql)
+**must be run in Supabase → SQL Editor before the website code that uses it is deployed** (safe to
+run again). It adds:
+
+- **Subcategories.** `categories.parent_id`, one level deep (e.g. HMI › PanelView 800). The
+  database refuses loops and deeper levels. Deleting a parent turns its subcategories into
+  top-level categories; their products are not affected. The migration also puts the HMI series
+  under "HMI" and drops the "HMI - " prefix from their names. Web addresses stay the same.
+- **`product_cards` view.** Products with their brand and category names and a search column, so
+  the site loads **one page (48 products) at a time**, filtered and searched on the server,
+  instead of downloading the whole catalogue.
+- **`category_counts` view.** Product counts for the category sidebar and the home page tiles.
+
+On the website:
+
+- `/products` and every brand page have a **category sidebar** (alphabetical; a button that opens
+  the list on phones). A category's subcategories open only while it, or one of them, is
+  selected. Choosing a parent shows the products of all its subcategories.
+- Filters live in the address: `/products?cat=hmi-panelview-800&q=6av&page=2`, so links can be
+  shared and Back works. Search matches every word you type against product name, description,
+  brand and category.
+- In **Admin → Categories**, the **Parent category** field puts a category inside another one.
+  Subcategories are listed under their parent, alphabetically. The order buttons arrange the
+  top-level categories, which is the order of the category tiles on the home page.

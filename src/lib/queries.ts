@@ -1,4 +1,4 @@
-import { queryOptions, useMutation, useQuery, type QueryClient } from "@tanstack/react-query";
+import { keepPreviousData, queryOptions, useMutation, useQuery, type QueryClient } from "@tanstack/react-query";
 import { db } from "@/lib/db";
 import type {
   Brand,
@@ -82,7 +82,7 @@ export function useSiteSettings() {
 }
 
 /* ---------------------------------------------------------------------------
- * Header search — products by name (published only, enforced by RLS too)
+ * Header search — quick product lookup (published only, enforced by RLS too)
  * ------------------------------------------------------------------------- */
 
 export type ProductSearchHit = {
@@ -99,6 +99,9 @@ function likePattern(term: string) {
   return `%${term.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
 }
 
+/** "PanelView 800  Plus" → ["panelview", "800", "plus"]: every word must match somewhere. */
+const searchWords = (q: string) => q.toLowerCase().split(/\s+/).filter(Boolean).slice(0, 8);
+
 export function useProductSearch(term: string) {
   const q = term.trim();
   return useQuery({
@@ -106,26 +109,36 @@ export function useProductSearch(term: string) {
     enabled: q.length >= 2,
     staleTime: 60 * 1000,
     queryFn: async (): Promise<ProductSearchHit[]> => {
-      const { data, error } = await db
-        .from("products")
-        .select("id, name, slug, image_url, brand:brands(name), category:categories(name)")
-        .eq("is_published", true)
-        .ilike("name", likePattern(q))
-        .order("sort_order")
-        .order("name")
-        .limit(8);
+      let req = db
+        .from("product_cards")
+        .select("id, name, slug, image_url, brand_name, category_name, category_parent_name")
+        .eq("is_published", true);
+      for (const w of searchWords(q)) req = req.ilike("search_text", likePattern(w));
+      const { data, error } = await req.order("sort_order").order("name").limit(8);
       if (error) throw error;
-      return data;
+      return data.map((r) => ({
+        id: r.id,
+        name: r.name,
+        slug: r.slug,
+        image_url: r.image_url,
+        brand: r.brand_name ? { name: r.brand_name } : null,
+        category: r.category_name
+          ? { name: r.category_parent_name ? `${r.category_parent_name} ${r.category_name}` : r.category_name }
+          : null,
+      }));
     },
   });
 }
 
 /* ---------------------------------------------------------------------------
- * Catalogue
+ * Catalogue — always loaded one page at a time (the catalogue has thousands of products)
  * ------------------------------------------------------------------------- */
 
-const CARD_FIELDS =
-  "id, name, slug, description, image_url, sort_order, brand_id, category_id, brand:brands(id, name, slug), category:categories(id, name, slug, sort_order)" as const;
+/** Products per page on the Products and brand pages. */
+export const PAGE_SIZE = 48;
+
+const CARD_VIEW_FIELDS =
+  "id, name, slug, description, image_url, sort_order, brand_id, brand_name, brand_slug, category_id, category_name, category_slug, category_sort_order, category_parent_name" as const;
 
 export type ProductCardData = {
   id: string;
@@ -137,26 +150,153 @@ export type ProductCardData = {
   brand_id: string;
   category_id: string;
   brand: { id: string; name: string; slug: string } | null;
-  category: { id: string; name: string; slug: string; sort_order: number } | null;
+  category: { id: string; name: string; slug: string; sort_order: number; parent_name: string | null } | null;
 };
 
-/** Every published product, for listing pages. Filtering happens in the browser —
- *  instant, and fine for a catalogue of up to a few thousand products. */
-export const catalogQuery = queryOptions({
-  queryKey: ["catalog"],
-  queryFn: async (): Promise<ProductCardData[]> => {
-    const { data, error } = await db
-      .from("products")
-      .select(CARD_FIELDS)
-      .eq("is_published", true)
-      .order("sort_order")
-      .order("name");
+type CardRow = {
+  id: string;
+  name: string;
+  slug: string;
+  description: string | null;
+  image_url: string | null;
+  sort_order: number;
+  brand_id: string;
+  brand_name: string | null;
+  brand_slug: string | null;
+  category_id: string;
+  category_name: string | null;
+  category_slug: string | null;
+  category_sort_order: number | null;
+  category_parent_name: string | null;
+};
+
+const toCard = (r: CardRow): ProductCardData => ({
+  id: r.id,
+  name: r.name,
+  slug: r.slug,
+  description: r.description,
+  image_url: r.image_url,
+  sort_order: r.sort_order,
+  brand_id: r.brand_id,
+  category_id: r.category_id,
+  brand: r.brand_name && r.brand_slug ? { id: r.brand_id, name: r.brand_name, slug: r.brand_slug } : null,
+  category:
+    r.category_name && r.category_slug
+      ? {
+          id: r.category_id,
+          name: r.category_name,
+          slug: r.category_slug,
+          sort_order: r.category_sort_order ?? 0,
+          parent_name: r.category_parent_name,
+        }
+      : null,
+});
+
+export type ProductPageParams = {
+  /** Only these categories (a parent category's id plus its subcategories' ids). Empty = all. */
+  categoryIds?: string[];
+  brandId?: string;
+  q?: string;
+  /** 1-based. */
+  page: number;
+};
+
+export type ProductPage = { items: ProductCardData[]; total: number };
+
+/** One page of published products — filtered, searched, sorted and counted by the server. */
+export const productPageQuery = ({ categoryIds = [], brandId = "", q = "", page }: ProductPageParams) =>
+  queryOptions({
+    queryKey: ["product_page", { cats: [...categoryIds].sort().join(","), brand: brandId, q: q.trim().toLowerCase(), page }],
+    queryFn: async (): Promise<ProductPage> => {
+      const build = (head: boolean) => {
+        let req = db.from("product_cards").select(CARD_VIEW_FIELDS, { count: "exact", head }).eq("is_published", true);
+        if (categoryIds.length) req = req.in("category_id", categoryIds);
+        if (brandId) req = req.eq("brand_id", brandId);
+        for (const w of searchWords(q)) req = req.ilike("search_text", likePattern(w));
+        return req;
+      };
+      const from = (Math.max(1, page) - 1) * PAGE_SIZE;
+      const { data, count, error } = await build(false)
+        .order("sort_order")
+        .order("name")
+        .order("id") // stable order, so no product shows up on two pages
+        .range(from, from + PAGE_SIZE - 1);
+      if (error) {
+        // A page past the end (e.g. an old link after products were removed): report the real total,
+        // so the page can send the visitor to the last page that exists.
+        if (error.code === "PGRST103") {
+          const { count: total, error: countError } = await build(true);
+          if (countError) throw countError;
+          return { items: [], total: total ?? 0 };
+        }
+        throw error;
+      }
+      return { items: (data as CardRow[]).map(toCard), total: count ?? 0 };
+    },
+  });
+
+/** Keeps the previous page on screen while the next one loads (no skeleton flash between pages). */
+export const useProductPage = (params: ProductPageParams, enabled = true) =>
+  useQuery({ ...productPageQuery(params), enabled, placeholderData: keepPreviousData });
+
+/**
+ * How many products each category has in the current search (only the category ids are fetched,
+ * so even a broad search stays light). Without a search the cheaper category_counts view is used.
+ */
+export const searchCategoryCountsQuery = (q: string) =>
+  queryOptions({
+    queryKey: ["search_category_counts", q.trim().toLowerCase()],
+    queryFn: async (): Promise<Record<string, number>> => {
+      let req = db.from("product_cards").select("category_id").eq("is_published", true);
+      for (const w of searchWords(q)) req = req.ilike("search_text", likePattern(w));
+      const { data, error } = await req;
+      if (error) throw error;
+      const counts: Record<string, number> = {};
+      for (const r of data) counts[r.category_id] = (counts[r.category_id] ?? 0) + 1;
+      return counts;
+    },
+  });
+
+/** Published products per category (category id → count). */
+export const categoryCountsQuery = queryOptions({
+  queryKey: ["category_counts"],
+  queryFn: async (): Promise<Record<string, number>> => {
+    const { data, error } = await db.from("category_counts").select("category_id, product_count");
     if (error) throw error;
-    return data;
+    return Object.fromEntries(data.map((r) => [r.category_id, r.product_count]));
   },
 });
 
-export const useCatalog = () => useQuery(catalogQuery);
+export const useCategoryCounts = (q = "") =>
+  useQuery(q.trim() ? searchCategoryCountsQuery(q) : categoryCountsQuery);
+
+/** A few other products from the same brand, preferably in the same category. */
+export const relatedProductsQuery = (product: { id: string; brand_id: string; category_id: string }) =>
+  queryOptions({
+    queryKey: ["related_products", product.id],
+    queryFn: async (): Promise<ProductCardData[]> => {
+      const fetchSome = async (sameCategory: boolean) => {
+        let req = db
+          .from("product_cards")
+          .select(CARD_VIEW_FIELDS)
+          .eq("is_published", true)
+          .eq("brand_id", product.brand_id)
+          .neq("id", product.id);
+        if (sameCategory) req = req.eq("category_id", product.category_id);
+        const { data, error } = await req.order("sort_order").order("name").limit(4);
+        if (error) throw error;
+        return (data as CardRow[]).map(toCard);
+      };
+      const sameCategory = await fetchSome(true);
+      return sameCategory.length ? sameCategory : fetchSome(false);
+    },
+  });
+
+export const useRelatedProducts = (product: { id: string; brand_id: string; category_id: string } | null | undefined) =>
+  useQuery({
+    ...relatedProductsQuery(product ?? { id: "", brand_id: "", category_id: "" }),
+    enabled: !!product,
+  });
 
 export const categoriesQuery = queryOptions({
   queryKey: ["categories"],
@@ -192,7 +332,7 @@ export const brandQuery = (slug: string) =>
 
 export const useBrand = (slug: string | undefined) => useQuery({ ...brandQuery(slug ?? ""), enabled: !!slug });
 
-/** Categories that a brand has published products in, with counts (the filter buttons). */
+/** Categories that a brand has published products in, with counts (the brand page sidebar). */
 export const brandCategoriesQuery = (brandId: string) =>
   queryOptions({
     queryKey: ["brand_categories", brandId],
@@ -211,24 +351,19 @@ export const brandCategoriesQuery = (brandId: string) =>
 export const useBrandCategories = (brandId: string | undefined) =>
   useQuery({ ...brandCategoriesQuery(brandId ?? ""), enabled: !!brandId });
 
-export const brandProductsQuery = (brandId: string) =>
-  queryOptions({
-    queryKey: ["brand_products", brandId],
-    queryFn: async (): Promise<ProductCardData[]> => {
-      const { data, error } = await db
-        .from("products")
-        .select(CARD_FIELDS)
-        .eq("brand_id", brandId)
-        .eq("is_published", true)
-        .order("sort_order")
-        .order("name");
-      if (error) throw error;
-      return data;
-    },
-  });
+/** Published products per brand (brand id → count), from the small brand_categories view. */
+export const brandCountsQuery = queryOptions({
+  queryKey: ["brand_counts"],
+  queryFn: async (): Promise<Record<string, number>> => {
+    const { data, error } = await db.from("brand_categories").select("brand_id, product_count");
+    if (error) throw error;
+    const counts: Record<string, number> = {};
+    for (const r of data) counts[r.brand_id] = (counts[r.brand_id] ?? 0) + r.product_count;
+    return counts;
+  },
+});
 
-export const useBrandProducts = (brandId: string | undefined) =>
-  useQuery({ ...brandProductsQuery(brandId ?? ""), enabled: !!brandId });
+export const useBrandCounts = () => useQuery(brandCountsQuery);
 
 export const categoryDocumentsQuery = (categoryId: string) =>
   queryOptions({
@@ -256,7 +391,7 @@ export type ProductDetail = Omit<ProductCardData, "brand" | "category"> & {
   specs: SpecRow[];
   datasheet_url: string | null;
   brand: { id: string; name: string; slug: string; logo_url: string | null } | null;
-  category: { id: string; name: string; slug: string } | null;
+  category: { id: string; name: string; slug: string; parent_id: string | null } | null;
   images: { id: string; url: string; alt: string | null; sort_order: number }[];
 };
 
@@ -280,7 +415,7 @@ export const productQuery = (slugOrId: string) =>
       const { data, error } = await db
         .from("products")
         .select(
-          "id, name, slug, description, image_url, datasheet_url, specs, sort_order, brand_id, category_id, brand:brands(id, name, slug, logo_url), category:categories(id, name, slug), images:product_images(id, url, alt, sort_order)",
+          "id, name, slug, description, image_url, datasheet_url, specs, sort_order, brand_id, category_id, brand:brands(id, name, slug, logo_url), category:categories(id, name, slug, parent_id), images:product_images(id, url, alt, sort_order)",
         )
         .eq(isUuid(slugOrId) ? "id" : "slug", slugOrId)
         .eq("is_published", true)
@@ -334,29 +469,34 @@ export async function prefetchForPath(client: QueryClient, pathname: string) {
     await Promise.all([
       client.prefetchQuery(brandsQuery),
       client.prefetchQuery(categoriesQuery),
-      client.prefetchQuery(catalogQuery),
+      client.prefetchQuery(categoryCountsQuery),
       client.prefetchQuery(industriesQuery),
     ]);
   } else if (section === "products" && slug) {
     const product = await client.fetchQuery(productQuery(slug)).catch(() => null);
     if (product) {
       await Promise.all([
-        client.prefetchQuery(brandProductsQuery(product.brand_id)),
+        client.prefetchQuery(relatedProductsQuery(product)),
         client.prefetchQuery(categoryDocumentsQuery(product.category_id)),
       ]);
     }
   } else if (section === "products") {
-    await Promise.all([client.prefetchQuery(catalogQuery), client.prefetchQuery(categoriesQuery)]);
+    await Promise.all([
+      client.prefetchQuery(categoriesQuery),
+      client.prefetchQuery(categoryCountsQuery),
+      client.prefetchQuery(productPageQuery({ page: 1 })),
+    ]);
   } else if (section === "brands" && slug) {
     const brand = await client.fetchQuery(brandQuery(slug)).catch(() => null);
     if (brand) {
       await Promise.all([
+        client.prefetchQuery(categoriesQuery),
         client.prefetchQuery(brandCategoriesQuery(brand.id)),
-        client.prefetchQuery(brandProductsQuery(brand.id)),
+        client.prefetchQuery(productPageQuery({ brandId: brand.id, page: 1 })),
       ]);
     }
   } else if (section === "brands") {
-    await Promise.all([client.prefetchQuery(brandsQuery), client.prefetchQuery(catalogQuery)]);
+    await Promise.all([client.prefetchQuery(brandsQuery), client.prefetchQuery(brandCountsQuery)]);
   } else if (section === "industries") {
     await client.prefetchQuery(industriesQuery);
   }

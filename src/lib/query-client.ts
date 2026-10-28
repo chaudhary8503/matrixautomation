@@ -16,14 +16,17 @@ export const queryClient = new QueryClient({
  */
 const SNAPSHOT_KEYS = new Set([
   "site_settings",
-  "catalog",
   "categories",
   "brands",
   "brand",
   "brand_categories",
-  "brand_products",
   "category_documents",
   "product",
+  "product_page", // one page (48) of the product list
+  "related_products",
+  "category_counts",
+  "search_category_counts",
+  "brand_counts",
   "industries",
   "logo_box", // where the logo sits inside each logo file (src/lib/logo-trim.ts)
 ]);

@@ -2,7 +2,8 @@ import { useMemo } from "react";
 import { Link } from "react-router";
 import { m } from "framer-motion";
 import { ArrowRight, Clock, Layers, Package, Send, TrendingUp, Users } from "lucide-react";
-import { useBrands, useCatalog, useCategories, useIndustries, useSiteSettings, type Settings as SiteInfo } from "@/lib/queries";
+import { useBrands, useCategories, useCategoryCounts, useIndustries, useSiteSettings, type Settings as SiteInfo } from "@/lib/queries";
+import { buildCategoryTree } from "@/lib/category-tree";
 import { industryIcon } from "@/lib/icons";
 import { SITE_URL, useSeo, type JsonLd } from "@/hooks/use-seo";
 import { SectionHeading } from "@/components/site/SectionHeading";
@@ -150,15 +151,19 @@ export default function Home() {
   });
   const brands = useBrands();
   const categories = useCategories();
-  const catalog = useCatalog();
+  const counts = useCategoryCounts();
   const industries = useIndustries();
 
-  // Only categories that actually have products, so no card leads to an empty page.
+  // Top-level categories only (a parent like HMI is one tile), in the order set in Admin, and only
+  // those with products (their own or their subcategories'), so no tile leads to an empty page.
   const shownCategories = useMemo(() => {
-    if (!categories.data) return [];
-    const used = catalog.data ? new Set(catalog.data.map((p) => p.category_id)) : null;
-    return categories.data.filter((c) => !used || used.has(c.id)).slice(0, 10);
-  }, [categories.data, catalog.data]);
+    if (!categories.data || !counts.data) return [];
+    const image = new Map(categories.data.map((c) => [c.id, c.image_url]));
+    return buildCategoryTree(categories.data, new Map(Object.entries(counts.data)))
+      .sort((a, b) => a.sort_order - b.sort_order)
+      .slice(0, 10)
+      .map((c) => ({ ...c, image_url: image.get(c.id) ?? null }));
+  }, [categories.data, counts.data]);
 
   // Brands with a logo first, so the section looks complete.
   const shownBrands = [...(brands.data ?? [])]
