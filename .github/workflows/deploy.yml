@@ -27,15 +27,17 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Pinned (not ubuntu-latest), so a new Ubuntu release can't change the build unannounced.
+    runs-on: ubuntu-24.04
+    # Prerendering ~3,100 pages takes roughly 10–15 minutes; the limit leaves plenty of headroom.
+    timeout-minutes: 60
     env:
       VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL }}
       VITE_SUPABASE_PUBLISHABLE_KEY: ${{ vars.VITE_SUPABASE_PUBLISHABLE_KEY }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -62,7 +64,7 @@ jobs:
       - name: Smoke test (real browser, desktop + mobile)
         run: npm run smoke
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dist
           path: dist/
@@ -74,16 +76,17 @@ jobs:
     needs: build
     # Off until the owner switches it on (Variables → DEPLOY_ENABLED = true). Only from main.
     if: vars.DEPLOY_ENABLED == 'true' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    runs-on: ubuntu-24.04
+    # After a code change every page file changes, so the first upload sends all ~3,100 of them.
+    timeout-minutes: 60
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: dist
           path: dist/
 
       - name: Upload to cPanel (FTPS)
-        uses: SamKirkland/FTP-Deploy-Action@v4.3.5
+        uses: SamKirkland/FTP-Deploy-Action@v4.4.0
         with:
           server: ${{ secrets.FTP_SERVER }}
           username: ${{ secrets.FTP_USERNAME }}

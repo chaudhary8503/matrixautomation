@@ -23,7 +23,12 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DIST = path.join(ROOT, "dist");
 const SITE_URL = "https://matrixpakistan.com";
 const STATIC_ROUTES = ["/", "/who-we-are", "/products", "/brands", "/industries", "/contact"];
-const CONCURRENCY = 4;
+// Pages rendered at the same time. Mostly waiting on the network, so well above the CPU count is fine.
+const CONCURRENCY = Number(process.env.PRERENDER_CONCURRENCY) || 20;
+// Only for timing tests: render just the first N routes (the run still fails/passes normally).
+const LIMIT = Number(process.env.PRERENDER_LIMIT) || 0;
+// 1×1 transparent PNG: stands in for product/category photos while prerendering (see below).
+const BLANK_PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");
 const TIMEOUT = 45_000;
 const SLUG_RE = /^[a-z0-9][a-z0-9._~-]*$/i;
 // Second line of defence (the app already filters, src/lib/query-client.ts): only these cache
@@ -185,143 +190,194 @@ const warnings = new Set();
 /** Logo measurements collected from every page: logo URL → box (written to dist/logo-boxes.json). */
 const logoBoxes = new Map();
 
-async function snapshot(context, origin, route) {
+/**
+ * A browser tab that renders many pages: it loads the site once, then moves from page to page
+ * inside the app (like a visitor clicking links). Starting the app is the expensive part of a
+ * page load, so this is several times faster than loading every page from scratch.
+ */
+async function openTab(context) {
   const page = await context.newPage();
-  const problems = [];
+  const tab = { page, problems: [], inflight: 0, lastActivity: Date.now(), loaded: false, used: 0 };
   // Data requests (the REST API) must succeed — the snapshot is built from them. A product photo
   // that fails to download doesn't change the HTML, so it is only a warning.
   const isApi = (url) => url.startsWith(`${SUPABASE_URL}/rest/`);
   const isSupabase = (url) => url.startsWith(SUPABASE_URL);
-  page.on("pageerror", (err) => problems.push(`JavaScript error: ${err.message}`));
+  page.on("pageerror", (err) => tab.problems.push(`JavaScript error: ${err.message}`));
+  page.on("request", () => {
+    tab.inflight++;
+    tab.lastActivity = Date.now();
+  });
+  const settle = () => {
+    tab.inflight = Math.max(0, tab.inflight - 1);
+    tab.lastActivity = Date.now();
+  };
+  page.on("requestfinished", settle);
   page.on("requestfailed", (r) => {
+    settle();
     const msg = `Supabase request failed (${r.failure()?.errorText}): ${r.url()}`;
-    if (isApi(r.url())) problems.push(msg);
+    if (isApi(r.url())) tab.problems.push(msg);
     else if (isSupabase(r.url())) warnings.add(msg);
   });
   page.on("response", (r) => {
     if (r.status() < 400) return;
     const msg = `Supabase answered ${r.status()}: ${r.url()}`;
-    if (isApi(r.url())) problems.push(msg);
+    if (isApi(r.url())) tab.problems.push(msg);
     else if (isSupabase(r.url())) warnings.add(msg);
   });
+  return tab;
+}
 
-  try {
-    await page.goto(origin + route, { waitUntil: "networkidle", timeout: TIMEOUT });
-    await waitUntilSettled(page);
-
-    // Scroll down in steps so every whileInView section (and lazy data under it) renders.
-    await page.evaluate(async () => {
-      const pause = () => new Promise((r) => setTimeout(r, 150));
-      for (let y = 0; y < document.documentElement.scrollHeight; y += Math.round(window.innerHeight * 0.5)) {
-        window.scrollTo(0, y);
-        await pause();
-      }
-      window.scrollTo(0, document.documentElement.scrollHeight);
-      await pause();
-    });
-    await waitUntilSettled(page);
-    // Give in-view animations (instant while prerendering) a moment to apply.
-    // A fast scroll can skip past a section before its in-view trigger fires: bring each
-    // straggler into view directly, then give it a moment.
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const settled = await page
-        .waitForFunction(() => window.__prerenderHidden().length === 0, null, { timeout: 2000 })
-        .then(() => true, () => false);
-      if (settled) break;
-      await page.evaluate(async () => {
-        for (const el of window.__prerenderHidden()) {
-          el.scrollIntoView({ block: "center" });
-          await new Promise((r) => setTimeout(r, 200));
-        }
-      });
-    }
-    await page.waitForTimeout(300);
-
-    // Every logo must be measured (src/lib/logo-trim.ts) before the snapshot, or it would be
-    // frozen invisible. Lazy logos have loaded by now, because the page was scrolled to the end.
-    const logosDone = await page
-      .waitForFunction(() => !document.querySelector("[data-logo-pending]"), null, { timeout: 15_000 })
-      .then(() => true, () => false);
-    if (!logosDone) {
-      const left = await page.$$eval("[data-logo-pending]", (els) => els.map((e) => e.getAttribute("src")));
-      fail(`${route}: ${left.length} logo(s) never finished loading/measuring, e.g. ${left[0]}`);
-    }
-
-    if (problems.length) fail(problems.join("\n  "));
-
-    const result = await page.evaluate(
-      (busy) => {
-        const report = {
-          error: !!document.querySelector("[data-error-state]"),
-          notFound: !!document.querySelector("[data-not-found]"),
-          busy: !!document.querySelector(busy),
-          canonical: document.querySelector('link[rel="canonical"]')?.getAttribute("href") ?? null,
-          robots: document.querySelector('meta[name="robots"]')?.getAttribute("content") ?? null,
-          hidden: window.__prerenderHidden().map(window.__prerenderDescribe),
-          html: "",
-        };
-
-        // Transient bits that must not be frozen into the snapshot.
-        document.querySelectorAll("[data-sonner-toast]").forEach((el) => el.remove());
-        document.querySelectorAll('a[aria-label="Chat with us on WhatsApp"]').forEach((el) => el.removeAttribute("style"));
-        // Logos were loaded in CORS mode only so they could be measured here; visitors load them normally.
-        document.querySelectorAll("img[data-logo]").forEach((el) => el.removeAttribute("crossorigin"));
-        // Vite's preload helper writes absolute URLs (http://127.0.0.1:port/assets/…) — make them root-relative.
-        for (const el of document.querySelectorAll("[href], [src]")) {
-          for (const attr of ["href", "src"]) {
-            const v = el.getAttribute(attr);
-            if (v?.startsWith(location.origin)) el.setAttribute(attr, v.slice(location.origin.length) || "/");
-          }
-        }
-        // Constant (no timestamp), so unchanged pages stay byte-identical and are not re-uploaded.
-        document.documentElement.setAttribute("data-prerendered", "true");
-
-        // The data this page was drawn with (public queries only — the app filters them), so the
-        // browser's first render matches the snapshot. The app marks it stale and refetches at once.
-        const state = window.__RQ_DEHYDRATE__?.() ?? { mutations: [], queries: [] };
-        report.queryKeys = state.queries.map((q) => q.queryKey);
-        report.logoBoxes = state.queries.filter((q) => q.queryKey[0] === "logo_box").map((q) => [q.queryKey[1], q.state.data]);
-        report.dropped = [];
-        state.queries = state.queries.filter((q) => {
-          // A very large query (e.g. thousands of products) isn't worth inlining into every page.
-          const big = JSON.stringify(q).length > 400_000;
-          if (big) report.dropped.push(JSON.stringify(q.queryKey));
-          return !big;
-        });
-        const script = document.createElement("script");
-        script.type = "application/json";
-        script.id = "rq-state";
-        // "<" escaped, so nothing in the data (e.g. "</script>") can end the tag early.
-        script.textContent = JSON.stringify(state).replace(/</g, "\\u003c");
-        document.body.appendChild(script);
-
-        report.html = `<!doctype html>\n${document.documentElement.outerHTML}`;
-        if (report.html.includes("127.0.0.1")) report.localUrl = true;
-        return report;
-      },
-      BUSY,
-    );
-
-    const expectedCanonical = SITE_URL + route;
-    if (result.error) fail(`${route} shows the error state`);
-    if (result.notFound) fail(`${route} renders the 404 page`);
-    if (result.busy) fail(`${route} is still loading`);
-    if (result.robots) fail(`${route} has <meta name="robots" content="${result.robots}">`);
-    if (result.canonical !== expectedCanonical) fail(`${route}: canonical is ${result.canonical}, expected ${expectedCanonical}`);
-    if (result.localUrl) fail(`${route}: snapshot contains a local server URL`);
-    const privateKey = result.queryKeys.find((k) => !PUBLIC_QUERY_KEYS.has(k[0]));
-    if (privateKey) fail(`${route}: non-public query ${JSON.stringify(privateKey)} would be embedded`);
-    if (!result.queryKeys.length) fail(`${route}: no query data captured (window.__RQ_DEHYDRATE__ missing?)`);
-    for (const k of result.dropped) console.warn(`[prerender] ${route}: query ${k} too large to embed, skipped`);
-    if (result.hidden.length) fail(`${route}: ${result.hidden.length} element(s) left at opacity 0, e.g. ${result.hidden[0]}`);
-
-    const out = route === "/" ? path.join(DIST, "index.html") : path.join(DIST, ...route.split("/").filter(Boolean), "index.html");
-    await mkdir(path.dirname(out), { recursive: true });
-    await writeFile(out, result.html);
-    for (const [src, box] of result.logoBoxes) logoBoxes.set(src, box);
-  } finally {
-    await page.close();
+/** Waits until no request has been running for `quietMs` (like Playwright's "networkidle", but
+ *  usable after an in-app page change too). */
+async function waitForQuiet(tab, quietMs = 400) {
+  const start = Date.now();
+  while (Date.now() - start < TIMEOUT) {
+    if (tab.inflight === 0 && Date.now() - tab.lastActivity >= quietMs) return;
+    await new Promise((r) => setTimeout(r, 50));
   }
+  fail(`network never went quiet (${tab.inflight} request(s) still running)`);
+}
+
+async function snapshot(tab, origin, route, { fresh }) {
+  const { page } = tab;
+  tab.problems.length = 0;
+  const expectedCanonical = SITE_URL + route;
+
+  if (fresh || !tab.loaded) {
+    await page.goto(origin + route, { waitUntil: "networkidle", timeout: TIMEOUT });
+    tab.loaded = true;
+    await waitUntilSettled(page);
+  } else {
+    // In-app page change, exactly what the router does when a link is clicked.
+    await page.evaluate((r) => {
+      history.pushState(null, "", r);
+      dispatchEvent(new PopStateEvent("popstate"));
+    }, route);
+    // The new page is on screen once its own canonical address is set and nothing is loading.
+    // (If not — e.g. it renders "not found" — the retry loads it fresh and reports exactly why.)
+    await page.waitForFunction(
+      ([busy, canonical]) =>
+        document.querySelector('link[rel="canonical"]')?.getAttribute("href") === canonical &&
+        !!document.querySelector("#root main") &&
+        !document.querySelector(busy),
+      [BUSY, expectedCanonical],
+      { timeout: TIMEOUT },
+    );
+  }
+  await waitForQuiet(tab);
+
+  // Scroll down in steps so every whileInView section (and lazy data under it) renders.
+  await page.evaluate(async () => {
+    const pause = () => new Promise((r) => setTimeout(r, 120));
+    for (let y = 0; y < document.documentElement.scrollHeight; y += Math.round(window.innerHeight * 0.9)) {
+      window.scrollTo(0, y);
+      await pause();
+    }
+    window.scrollTo(0, document.documentElement.scrollHeight);
+    await pause();
+  });
+  await waitForQuiet(tab);
+  await waitUntilSettled(page);
+  // A fast scroll can skip past a section before its in-view trigger fires: bring each
+  // straggler into view directly, then give it a moment.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const settled = await page
+      .waitForFunction(() => window.__prerenderHidden().length === 0, null, { timeout: 2000 })
+      .then(() => true, () => false);
+    if (settled) break;
+    await page.evaluate(async () => {
+      for (const el of window.__prerenderHidden()) {
+        el.scrollIntoView({ block: "center" });
+        await new Promise((r) => setTimeout(r, 200));
+      }
+    });
+  }
+  await page.waitForTimeout(150);
+
+  // Every logo must be measured (src/lib/logo-trim.ts) before the snapshot, or it would be
+  // frozen invisible. Lazy logos have loaded by now, because the page was scrolled to the end.
+  const logosDone = await page
+    .waitForFunction(() => !document.querySelector("[data-logo-pending]"), null, { timeout: 15_000 })
+    .then(() => true, () => false);
+  if (!logosDone) {
+    const left = await page.$$eval("[data-logo-pending]", (els) => els.map((e) => e.getAttribute("src")));
+    fail(`${route}: ${left.length} logo(s) never finished loading/measuring, e.g. ${left[0]}`);
+  }
+
+  if (tab.problems.length) fail(tab.problems.join("\n  "));
+
+  const result = await page.evaluate(
+    (busy) => {
+      const report = {
+        error: !!document.querySelector("[data-error-state]"),
+        notFound: !!document.querySelector("[data-not-found]"),
+        busy: !!document.querySelector(busy),
+        canonical: document.querySelector('link[rel="canonical"]')?.getAttribute("href") ?? null,
+        robots: document.querySelector('meta[name="robots"]')?.getAttribute("content") ?? null,
+        hidden: window.__prerenderHidden().map(window.__prerenderDescribe),
+        html: "",
+      };
+
+      // Everything below works on a COPY of the page, so the live app (which goes on to render
+      // the next page) is never touched.
+      const root = document.documentElement.cloneNode(true);
+      // Transient bits that must not be frozen into the snapshot.
+      root.querySelectorAll("[data-sonner-toast]").forEach((el) => el.remove());
+      root.querySelectorAll('a[aria-label="Chat with us on WhatsApp"]').forEach((el) => el.removeAttribute("style"));
+      // Logos were loaded in CORS mode only so they could be measured here; visitors load them normally.
+      root.querySelectorAll("img[data-logo]").forEach((el) => el.removeAttribute("crossorigin"));
+      // Vite's preload helper writes absolute URLs (http://127.0.0.1:port/assets/…) — make them root-relative.
+      for (const el of root.querySelectorAll("[href], [src]")) {
+        for (const attr of ["href", "src"]) {
+          const v = el.getAttribute(attr);
+          if (v?.startsWith(location.origin)) el.setAttribute(attr, v.slice(location.origin.length) || "/");
+        }
+      }
+      // Constant (no timestamp), so unchanged pages stay byte-identical and are not re-uploaded.
+      root.setAttribute("data-prerendered", "true");
+
+      // The data this page was drawn with (public queries this page uses — the app filters them),
+      // so the browser's first render matches the snapshot. The app marks it stale and refetches.
+      const state = window.__RQ_DEHYDRATE__?.() ?? { mutations: [], queries: [] };
+      report.queryKeys = state.queries.map((q) => q.queryKey);
+      report.logoBoxes = state.queries.filter((q) => q.queryKey[0] === "logo_box").map((q) => [q.queryKey[1], q.state.data]);
+      report.dropped = [];
+      state.queries = state.queries.filter((q) => {
+        // A very large query (e.g. thousands of products) isn't worth inlining into every page.
+        const big = JSON.stringify(q).length > 400_000;
+        if (big) report.dropped.push(JSON.stringify(q.queryKey));
+        return !big;
+      });
+      const script = document.createElement("script");
+      script.type = "application/json";
+      script.id = "rq-state";
+      // "<" escaped, so nothing in the data (e.g. "</script>") can end the tag early.
+      script.textContent = JSON.stringify(state).replace(/</g, "\\u003c");
+      root.querySelector("body").appendChild(script);
+
+      report.html = `<!doctype html>\n${root.outerHTML}`;
+      if (report.html.includes("127.0.0.1")) report.localUrl = true;
+      return report;
+    },
+    BUSY,
+  );
+
+  if (result.error) fail(`${route} shows the error state`);
+  if (result.notFound) fail(`${route} renders the 404 page`);
+  if (result.busy) fail(`${route} is still loading`);
+  if (result.robots) fail(`${route} has <meta name="robots" content="${result.robots}">`);
+  if (result.canonical !== expectedCanonical) fail(`${route}: canonical is ${result.canonical}, expected ${expectedCanonical}`);
+  if (result.localUrl) fail(`${route}: snapshot contains a local server URL`);
+  const privateKey = result.queryKeys.find((k) => !PUBLIC_QUERY_KEYS.has(k[0]));
+  if (privateKey) fail(`${route}: non-public query ${JSON.stringify(privateKey)} would be embedded`);
+  if (!result.queryKeys.length) fail(`${route}: no query data captured (window.__RQ_DEHYDRATE__ missing?)`);
+  for (const k of result.dropped) console.warn(`[prerender] ${route}: query ${k} too large to embed, skipped`);
+  if (result.hidden.length) fail(`${route}: ${result.hidden.length} element(s) left at opacity 0, e.g. ${result.hidden[0]}`);
+
+  const out = route === "/" ? path.join(DIST, "index.html") : path.join(DIST, ...route.split("/").filter(Boolean), "index.html");
+  await mkdir(path.dirname(out), { recursive: true });
+  await writeFile(out, result.html);
+  for (const [src, box] of result.logoBoxes) logoBoxes.set(src, box);
 }
 
 /* -------------------------------------------------------------- sitemap -- */
@@ -356,8 +412,10 @@ async function main() {
   }
 
   // 2. Routes, straight from Supabase.
-  const entries = await loadRoutes();
-  log(`${entries.length} routes (${STATIC_ROUTES.length} static + products + brands)`);
+  const allEntries = await loadRoutes();
+  const entries = LIMIT ? allEntries.slice(0, LIMIT) : allEntries;
+  log(`${entries.length} routes (${STATIC_ROUTES.length} static + products + brands), ${CONCURRENCY} at a time`);
+  if (LIMIT) console.warn(`[prerender] PRERENDER_LIMIT=${LIMIT}: timing test only — this dist/ is incomplete, don't deploy it`);
 
   // 3. Local server with the same SPA fallback as the live site.
   const server = await startServer();
@@ -368,26 +426,45 @@ async function main() {
   let done = 0;
   try {
     const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, locale: "en-US" });
+    // Photos don't change the saved HTML (the <img> tag keeps its real address), so they are answered
+    // instantly with a blank image instead of being downloaded — a large share of the time per page.
+    // Brand/client logos are still loaded for real: they are measured for logo trimming.
+    await context.route(/\/storage\/v1\/object\/public\/images\/(products|categories)\//, (route) =>
+      route.fulfill({ status: 200, contentType: "image/png", body: BLANK_PNG }),
+    );
     await context.addInitScript(`window.__PRERENDER__ = true; window.__prerenderHidden = ${findHidden}; window.__prerenderDescribe = ${describe};`);
 
     const queue = [...entries];
     const worker = async () => {
-      for (let next = queue.shift(); next; next = queue.shift()) {
-        // Thousands of pages means tens of thousands of requests: one network hiccup shouldn't
-        // throw the whole run away. A failing page is tried up to 3 times; a real problem (error
-        // state, 404, missing data) fails every time and still stops the run.
-        for (let attempt = 1; ; attempt++) {
-          try {
-            await snapshot(context, origin, next.route);
-            break;
-          } catch (err) {
-            if (attempt >= 3) throw err;
-            log(`retrying ${next.route} (attempt ${attempt + 1} of 3): ${String(err.message ?? err).split("\n")[0]}`);
-            await new Promise((r) => setTimeout(r, 3000 * attempt));
+      let tab = await openTab(context);
+      const replaceTab = async () => {
+        await tab.page.close().catch(() => {});
+        tab = await openTab(context);
+      };
+      try {
+        for (let next = queue.shift(); next; next = queue.shift()) {
+          // Thousands of pages means tens of thousands of requests: one network hiccup shouldn't
+          // throw the whole run away. A failing page is tried up to 3 times, the retries in a fresh
+          // tab with a full page load; a real problem (error state, 404, missing data) fails every
+          // time and still stops the run.
+          for (let attempt = 1; ; attempt++) {
+            try {
+              await snapshot(tab, origin, next.route, { fresh: attempt > 1 });
+              break;
+            } catch (err) {
+              if (attempt >= 3) throw err;
+              log(`retrying ${next.route} (attempt ${attempt + 1} of 3): ${String(err.message ?? err).split("\n")[0]}`);
+              await replaceTab();
+              await new Promise((r) => setTimeout(r, 2000 * attempt));
+            }
           }
+          done++;
+          if (done % 50 === 0 || done === entries.length) log(`${done}/${entries.length} pages`);
+          // A fresh tab now and then keeps memory use flat over thousands of pages.
+          if (++tab.used >= 300) await replaceTab();
         }
-        done++;
-        if (done % 10 === 0 || done === entries.length) log(`${done}/${entries.length} pages`);
+      } finally {
+        await tab.page.close().catch(() => {});
       }
     };
     await Promise.all(Array.from({ length: Math.min(CONCURRENCY, entries.length) }, worker));

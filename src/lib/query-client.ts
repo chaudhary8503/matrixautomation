@@ -61,7 +61,9 @@ export function hydrateFromSnapshot() {
 if (window.__PRERENDER__) {
   window.__RQ_DEHYDRATE__ = () =>
     dehydrate(queryClient, {
-      shouldDehydrateQuery: (q) => isSnapshotKey(q.queryKey) && q.state.status === "success",
+      // Only what the current page is showing (observed queries): the prerender moves from page to
+      // page inside one app, so the cache also holds earlier pages' data, which mustn't be embedded.
+      shouldDehydrateQuery: (q) => isSnapshotKey(q.queryKey) && q.state.status === "success" && q.getObserversCount() > 0,
       shouldDehydrateMutation: () => false,
     });
 }
